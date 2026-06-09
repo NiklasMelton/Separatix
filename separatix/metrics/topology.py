@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
 from separatix.config import ProfilerConfig
+from separatix.constants import BUDGETS
 from separatix.densify import ensure_dense_or_sample
 
 
@@ -20,10 +21,19 @@ def compute_topology_diagnostics(
     report_context: dict[str, Any],
 ) -> dict[str, Any]:
     """Run optional persistent topology diagnostics when available and feasible."""
+    budget = cast(dict[str, Any], BUDGETS[config.budget])
     if config.topology == "off":
         return {"mode": "off", "skipped_reason": "topology disabled"}
     if config.topology == "graph":
         return {"mode": "graph", "skipped_reason": "persistent topology not requested"}
+    if (
+        config.topology == "auto"
+        and not budget["run_persistent_topology"]
+    ):
+        return {
+            "mode": config.topology,
+            "skipped_reason": "persistent topology disabled for this budget",
+        }
 
     indices = np.asarray(boundary.get("candidate_indices", []), dtype=int)
     if indices.shape[0] < 30:
@@ -35,6 +45,9 @@ def compute_topology_diagnostics(
             "skipped_reason": "too few boundary candidates",
         }
     if indices.shape[0] > 2000:
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {"name": "persistent_topology", "reason": "too many boundary candidates"}
+        )
         return {
             "mode": config.topology,
             "skipped_reason": "too many boundary candidates",
@@ -43,6 +56,9 @@ def compute_topology_diagnostics(
         geometry.get("distance_concentration_proxy") is not None
         and geometry["distance_concentration_proxy"] < 0.05
     ):
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {"name": "persistent_topology", "reason": "geometry reliability too low"}
+        )
         return {
             "mode": config.topology,
             "skipped_reason": "geometry reliability too low",

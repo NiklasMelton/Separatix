@@ -33,3 +33,9 @@ def test_sparse_skip_policy_records_skip() -> None:
         random_state=0,
     )
     assert report.skipped_diagnostics
+    kernel_skips = [
+        item
+        for item in report.skipped_diagnostics
+        if item["name"] == "kernel_approximation_probe"
+    ]
+    assert len(kernel_skips) == 1
