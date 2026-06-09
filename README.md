@@ -16,13 +16,13 @@ diagnostic and auditing tool designed to make its reasoning visible.
 ## Installation
 
 ```bash
-poetry add separatix
+pip install separatix
 ```
 
-For local development:
+To install the latest development version directly from GitHub:
 
 ```bash
-poetry install --with dev
+pip install "git+https://github.com/NiklasMelton/Separatix.git@develop"
 ```
 
 ## Quick start
@@ -129,7 +129,10 @@ should acknowledge:
 
 - Ho and Basu, "Complexity Measures of Supervised Classification Problems"
   ([PDF](https://sci2s.ugr.es/keel/pdf/algorithm/articulo/2002-IEEE-TPAMI-Ho-DC.pdf))
-- the ACM paper at [https://dl.acm.org/doi/10.1145/3347711](https://dl.acm.org/doi/10.1145/3347711)
+- Lorena, Garcia, Lehmann, Souto, and Ho, "How Complex Is Your
+  Classification Problem? A Survey on Measuring Classification Complexity"
+  ([DOI](https://doi.org/10.1145/3347711),
+  [PDF](https://dl.acm.org/doi/epdf/10.1145/3347711))
 
 We do not follow those procedures directly, but they are relevant background
 for why geometry-aware pretraining diagnostics are useful.

@@ -308,7 +308,11 @@ references are:
 
 - Tin Kam Ho and Mitra Basu, "Complexity Measures of Supervised Classification
   Problems" ([PDF](https://sci2s.ugr.es/keel/pdf/algorithm/articulo/2002-IEEE-TPAMI-Ho-DC.pdf))
-- the ACM paper at [https://dl.acm.org/doi/10.1145/3347711](https://dl.acm.org/doi/10.1145/3347711)
+- Ana C. Lorena, Lu\'is P. F. Garcia, Jens Lehmann, Marcilio C. P. Souto, and
+  Tin Kam Ho, "How Complex Is Your Classification Problem? A Survey on
+  Measuring Classification Complexity"
+  ([DOI](https://doi.org/10.1145/3347711),
+  [PDF](https://dl.acm.org/doi/epdf/10.1145/3347711))
 
 `separatix` does not implement those procedures directly. They are better
 understood here as related work and inspiration for the broader idea that data
