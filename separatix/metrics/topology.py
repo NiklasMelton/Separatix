@@ -26,10 +26,7 @@ def compute_topology_diagnostics(
         return {"mode": "off", "skipped_reason": "topology disabled"}
     if config.topology == "graph":
         return {"mode": "graph", "skipped_reason": "persistent topology not requested"}
-    if (
-        config.topology == "auto"
-        and not budget["run_persistent_topology"]
-    ):
+    if config.topology == "auto" and not budget["run_persistent_topology"]:
         return {
             "mode": config.topology,
             "skipped_reason": "persistent topology disabled for this budget",
