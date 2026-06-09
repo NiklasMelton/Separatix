@@ -70,7 +70,7 @@ def stratified_subsample_indices(
                 base[i] += 1
                 total += 1
 
-    for cls, take in zip(classes, base, strict=False):
+    for cls, take in zip(classes, base):  # noqa: B905
         cls_idx = np.flatnonzero(y == cls)
         sampled = rng.choice(cls_idx, size=int(take), replace=False)
         chosen.extend(sampled.tolist())
