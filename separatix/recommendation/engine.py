@@ -28,22 +28,29 @@ def compute_scores(
 ) -> dict[str, float | None]:
     """Compute transparent normalized scores."""
     probes = metrics["probes"]
-    dummy = probes["dummy"]["balanced_accuracy"]
-    linear = probes["linear"]["balanced_accuracy"]
-    best_available = max(
+    dummy = probes.get("dummy", {}).get("balanced_accuracy")
+    linear = probes.get("linear", {}).get("balanced_accuracy")
+    available_scores = [
         result["balanced_accuracy"]
         for result in probes.values()
         if "balanced_accuracy" in result
+    ]
+    best_available = max(available_scores) if available_scores else None
+    nonlinear_scores = [
+        result["balanced_accuracy"]
+        for name, result in probes.items()
+        if name in {"knn", "kernel_approx"} and "balanced_accuracy" in result
+    ]
+    best_nonlinear = (
+        max(nonlinear_scores or ([linear] if linear is not None else []))
+        if nonlinear_scores or linear is not None
+        else None
     )
-    best_nonlinear = max(
-        [
-            result["balanced_accuracy"]
-            for name, result in probes.items()
-            if name in {"knn", "kernel_approx"} and "balanced_accuracy" in result
-        ]
-        or [linear]
+    signal = (
+        _clip((best_available - dummy) / max(1e-9, 1.0 - dummy))
+        if best_available is not None and dummy is not None
+        else None
     )
-    signal = _clip((best_available - dummy) / max(1e-9, 1.0 - dummy))
     overlap = _clip(
         np.mean(
             [
@@ -53,8 +60,16 @@ def compute_scores(
             ]
         )
     )
-    linearity = _clip(linear / max(best_available, 1e-9))
-    nonlinear = _clip((best_nonlinear - linear) / max(1e-9, 1.0 - linear))
+    linearity = (
+        _clip(linear / max(best_available, 1e-9))
+        if linear is not None and best_available is not None
+        else None
+    )
+    nonlinear = (
+        _clip((best_nonlinear - linear) / max(1e-9, 1.0 - linear))
+        if linear is not None and best_nonlinear is not None
+        else None
+    )
     fragmentation = _clip(metrics["graph"].get("graph_fragmentation_score", 0.0))
     topology = None
     if "h1_persistence_count" in metrics["topology"]:
@@ -84,6 +99,11 @@ def compute_scores(
         10, metrics["audit"]["n_classes"] * 2
     ):
         reliability -= 0.1
+    linear_stability = probes.get("linear", {}).get("stability_balanced_accuracy_std")
+    if linear_stability is not None:
+        reliability -= min(0.15, float(linear_stability) * 0.5)
+    if best_available is None or linear is None:
+        reliability -= 0.3
     return {
         "signal_score": signal,
         "overlap_score": overlap,

@@ -38,7 +38,7 @@ def compute_neighborhood_diagnostics(
     X_fit = X_used
     if sparse.issparse(X_used):
         try:
-            nn = NearestNeighbors(n_neighbors=k + 1)
+            nn = NearestNeighbors(n_neighbors=k)
             nn.fit(X_fit)
         except TypeError:
             dense_info = ensure_dense_or_sample(
@@ -55,18 +55,18 @@ def compute_neighborhood_diagnostics(
                 }
             X_fit = dense_info["X"]
             y_used = dense_info["y"]
-            nn = NearestNeighbors(n_neighbors=min(k + 1, len(y_used)))
+            nn = NearestNeighbors(n_neighbors=min(k, len(y_used) - 1))
             nn.fit(X_fit)
     else:
-        nn = NearestNeighbors(n_neighbors=k + 1)
+        nn = NearestNeighbors(n_neighbors=k)
         nn.fit(X_fit)
 
-    indices = nn.kneighbors(return_distance=False)[:, 1:]
+    indices = nn.kneighbors(X_fit, n_neighbors=k + 1, return_distance=False)[:, 1:]
     entropies = []
     ambiguities = []
     same_class = []
     enemy_distances = []
-    distances, idxs = nn.kneighbors(return_distance=True)
+    distances, idxs = nn.kneighbors(X_fit, n_neighbors=k + 1, return_distance=True)
     for row_i, neigh in enumerate(indices):
         neigh_labels = y_used[neigh]
         counts = np.bincount(neigh_labels, minlength=len(np.unique(y_used)))

@@ -30,3 +30,14 @@ def test_deterministic_report() -> None:
     report_b = diagnose(X, y, return_report=True, random_state=7)
     assert report_a.to_dict()["recommendation"] == report_b.to_dict()["recommendation"]
     assert report_a.scores == report_b.scores
+
+
+def test_tiny_supported_dataset_degrades_gracefully() -> None:
+    X = [[0.0], [1.0], [2.0], [3.0]]
+    y = [0, 0, 1, 1]
+    report = diagnose(X, y, return_report=True, budget="fast", random_state=0)
+    assert report.recommendation
+    assert report.metrics["probes"]["linear"]["evaluation_mode"] in {
+        "cross_validation",
+        "resubstitution_low_reliability",
+    }

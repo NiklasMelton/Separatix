@@ -10,15 +10,20 @@ from scipy import sparse
 from sklearn.dummy import DummyClassifier
 from sklearn.kernel_approximation import RBFSampler
 from sklearn.linear_model import LogisticRegression, SGDClassifier
-from sklearn.model_selection import cross_val_predict
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 
 from separatix.config import ProfilerConfig
 from separatix.constants import BUDGETS
 from separatix.densify import ensure_dense_or_sample
-from separatix.models.scoring import choose_cv, summarize_predictions
+from separatix.models.scoring import (
+    choose_cv,
+    evaluate_estimator,
+    summarize_predictions,
+    summarize_stability,
+)
 from separatix.sampling import BudgetConfig, cap_samples_for_budget
+from separatix.utils.warnings import record_warning
 
 
 def _linear_classifier(X: Any) -> LogisticRegression:
@@ -36,6 +41,7 @@ def run_model_probes(
     *,
     config: ProfilerConfig,
     report_context: dict[str, Any],
+    class_labels: np.ndarray | None = None,
 ) -> dict[str, dict[str, object]]:
     """Run lightweight baseline and probe classifiers."""
     budget = cast(BudgetConfig, BUDGETS[config.budget])
@@ -43,25 +49,51 @@ def run_model_probes(
         X, y, config=config, reason="probe"
     )
     cv = choose_cv(y_used, budget["cv_folds"])
+    warnings_list = report_context.setdefault("warnings", [])
+    if cv is None:
+        record_warning(
+            (
+                "Very small class counts forced low-reliability "
+                "in-sample probe evaluation."
+            ),
+            warnings_list,
+            UserWarning,
+        )
     probes: dict[str, Any] = {
         "dummy": DummyClassifier(strategy="prior"),
         "linear": _linear_classifier(X_used),
         "knn": KNeighborsClassifier(
-            n_neighbors=min(15, max(3, int(np.sqrt(len(y_used)))))
+            n_neighbors=min(
+                max(1, len(y_used) - 1),
+                min(15, max(3, int(np.sqrt(len(y_used))))),
+            )
         ),
     }
     results: dict[str, dict[str, object]] = {}
     for name, estimator in probes.items():
         start = time.perf_counter()
-        preds = cross_val_predict(
-            estimator, X_used, y_used, cv=cv, n_jobs=config.n_jobs
+        preds, evaluation_mode = evaluate_estimator(
+            estimator,
+            X_used,
+            y_used,
+            cv=cv,
         )
-        metrics = summarize_predictions(y_used, preds)
+        metrics = summarize_predictions(y_used, preds, class_labels=class_labels)
+        metrics.update(
+            summarize_stability(
+                estimator,
+                X_used,
+                y_used,
+                repeats=budget["bootstrap_repeats"],
+                random_state=config.random_state,
+            )
+        )
         metrics.update(
             {
                 "model_name": estimator.__class__.__name__,
                 "runtime_seconds": float(time.perf_counter() - start),
                 "sample_info": sample_info,
+                "evaluation_mode": evaluation_mode,
                 "predictions": preds.tolist(),
             }
         )
@@ -81,12 +113,6 @@ def run_model_probes(
                 "model_name": "RBFSampler+SGDClassifier",
                 "sample_info": sample_info,
             }
-            report_context.setdefault("skipped_diagnostics", []).append(
-                {
-                    "name": "kernel_approximation_probe",
-                    "reason": "dense conversion unavailable under current policy",
-                }
-            )
         else:
             estimator = Pipeline(
                 [
@@ -111,19 +137,30 @@ def run_model_probes(
                 ]
             )
             start = time.perf_counter()
-            preds = cross_val_predict(
+            preds, evaluation_mode = evaluate_estimator(
                 estimator,
                 dense_info["X"],
                 dense_info["y"],
                 cv=choose_cv(dense_info["y"], budget["cv_folds"]),
-                n_jobs=config.n_jobs,
             )
-            metrics = summarize_predictions(dense_info["y"], preds)
+            metrics = summarize_predictions(
+                dense_info["y"], preds, class_labels=class_labels
+            )
+            metrics.update(
+                summarize_stability(
+                    estimator,
+                    dense_info["X"],
+                    dense_info["y"],
+                    repeats=budget["bootstrap_repeats"],
+                    random_state=config.random_state,
+                )
+            )
             metrics.update(
                 {
                     "model_name": "RBFSampler+SGDClassifier",
                     "runtime_seconds": float(time.perf_counter() - start),
                     "sample_info": sample_info,
+                    "evaluation_mode": evaluation_mode,
                     "predictions": preds.tolist(),
                 }
             )
