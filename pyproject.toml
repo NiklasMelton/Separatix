@@ -1,0 +1,49 @@
+[tool.poetry]
+name = "separatix"
+version = "0.0.0"
+description = "Diagnostic profiling of labeled embeddings for classification model complexity guidance."
+authors = ["Niklas Melton <niklas@example.com>"]
+readme = "README.md"
+license = "MIT"
+packages = [{ include = "separatix" }]
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.15"
+numpy = ">=1.23"
+scipy = ">=1.9"
+scikit-learn = ">=1.2"
+pandas = { version = ">=1.5", optional = true }
+matplotlib = { version = ">=3.6", optional = true }
+ripser = { version = ">=0.6", optional = true }
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7"
+pytest-cov = ">=4"
+ruff = ">=0.5"
+mypy = ">=1"
+build = ">=1"
+twine = ">=5"
+
+[tool.poetry.extras]
+pandas = ["pandas"]
+tda = ["ripser"]
+examples = ["matplotlib", "pandas"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
