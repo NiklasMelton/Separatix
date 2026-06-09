@@ -1,3 +1,5 @@
+[![separatix logo](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_logo_transparent.png)](https://github.com/NiklasMelton/Separatix)
+
 # separatix
 
 `separatix` profiles labeled feature spaces before classifier training and
