@@ -39,7 +39,8 @@ def compute_scores(
     nonlinear_scores = [
         result["balanced_accuracy"]
         for name, result in probes.items()
-        if name in {"knn", "kernel_approx"} and "balanced_accuracy" in result
+        if name in {"smooth_poly", "knn", "kernel_approx"}
+        and "balanced_accuracy" in result
     ]
     best_nonlinear = (
         max(nonlinear_scores or ([linear] if linear is not None else []))
@@ -119,8 +120,10 @@ def make_recommendation(
     scores: dict[str, float | None], metrics: dict[str, Any]
 ) -> tuple[str, str, list[str], dict[str, str]]:
     """Generate a rule-based recommendation and decision path."""
+    smooth_margin_tolerance = 0.01
     decision_path: list[str] = []
     interpretations: dict[str, str] = {}
+    probes = metrics["probes"]
     reliability = scores["reliability_score"] or 0.0
     signal = scores["signal_score"] or 0.0
     nonlinearity = scores["nonlinearity_score"] or 0.0
@@ -150,6 +153,18 @@ def make_recommendation(
         decision_path.append("Local overlap was high without much nonlinear gain.")
     elif nonlinearity >= 0.18:
         best_probe = metrics["baseline"]["best_probe"]
+        smooth_score = probes.get("smooth_poly", {}).get("balanced_accuracy")
+        knn_score = probes.get("knn", {}).get("balanced_accuracy")
+        kernel_score = probes.get("kernel_approx", {}).get("balanced_accuracy")
+        best_local_kernel = max(
+            [score for score in (knn_score, kernel_score) if score is not None],
+            default=None,
+        )
+        smooth_margin = (
+            float(smooth_score - best_local_kernel)
+            if smooth_score is not None and best_local_kernel is not None
+            else None
+        )
         decision_path.append(
             "Best nonlinear probe improved over the linear probe, "
             f"with {best_probe} performing best."
@@ -157,12 +172,34 @@ def make_recommendation(
         if fragmentation >= 0.55:
             recommendation = HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
             decision_path.append("Boundary graph fragmentation was high.")
-        elif topology >= 0.4:
+        elif smooth_score is not None and (
+            best_local_kernel is None
+            or smooth_margin is not None
+            and smooth_margin >= smooth_margin_tolerance
+        ):
+            recommendation = SMOOTH_NONLINEAR_RECOMMENDED
+            decision_path.append(
+                "A smooth global nonlinear probe clearly outperformed the "
+                "local and kernel-style probes."
+            )
+        elif topology >= 0.4 and (
+            smooth_margin is None or smooth_margin < smooth_margin_tolerance
+        ):
             recommendation = KERNEL_OR_LOCAL_RECOMMENDED
             decision_path.append(
                 "Persistent topology suggested nontrivial local structure."
             )
-        elif metrics["baseline"]["best_probe"] in {"knn", "kernel_approx"}:
+        elif (
+            smooth_score is not None
+            and smooth_margin is not None
+            and smooth_margin >= -smooth_margin_tolerance
+        ):
+            recommendation = SMOOTH_NONLINEAR_RECOMMENDED
+            decision_path.append(
+                "A smooth global nonlinear probe was competitive with the "
+                "local and kernel-style probes."
+            )
+        elif best_local_kernel is not None:
             recommendation = KERNEL_OR_LOCAL_RECOMMENDED
             decision_path.append(
                 "Local or kernel-style probes outperformed smoother global probes."
