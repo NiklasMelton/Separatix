@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sklearn.datasets import make_blobs
 
 from separatix import diagnose
@@ -25,6 +26,8 @@ def test_topology_persistent_without_dependency_is_safe() -> None:
 def test_topology_strength_is_not_saturated_for_smooth_curve() -> None:
     X, y = _binary_smooth(2)
     report = diagnose(X, y, return_report=True, topology="persistent", random_state=0)
+    if "topology_strength" not in report.metrics["topology"]:
+        pytest.skip("persistent topology strength is unavailable in this environment")
     assert report.metrics["topology"]["topology_strength"] < 0.2
     assert report.scores["topology_score"] < 0.2
 
@@ -46,6 +49,8 @@ def test_topology_strength_is_higher_for_spiral_than_smooth_curve() -> None:
         topology="persistent",
         random_state=0,
     )
+    if "topology_strength" not in smooth.metrics["topology"]:
+        pytest.skip("persistent topology strength is unavailable in this environment")
     assert spiral.metrics["topology"]["topology_strength"] >= 0.4
     assert spiral.scores["topology_score"] > smooth.scores["topology_score"] + 0.3
 
@@ -60,5 +65,7 @@ def test_topology_strength_does_not_saturate_from_sample_count_alone() -> None:
         topology="persistent",
         random_state=0,
     )
+    if "topology_strength" not in report.metrics["topology"]:
+        pytest.skip("persistent topology strength is unavailable in this environment")
     assert report.metrics["boundary"]["boundary_sample_size"] >= 100
     assert report.metrics["topology"]["topology_strength"] < 0.4

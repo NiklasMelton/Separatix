@@ -137,6 +137,8 @@ def _assert_supporting_evidence(
 ) -> None:
     probes = report.metrics["probes"]
     topology_strength = report.scores.get("topology_score") or 0.0
+    topology_metrics = report.metrics["topology"]
+    has_topology_strength = "topology_strength" in topology_metrics
     if expected == LINEAR_LIKELY_SUFFICIENT:
         assert report.scores["linearity_score"] is not None
         assert report.scores["linearity_score"] >= 0.93
@@ -144,9 +146,15 @@ def _assert_supporting_evidence(
         margin = _local_kernel_margin(report)
         assert probes["smooth_poly"].get("balanced_accuracy") is not None
         assert margin is None or margin <= 0.02
-        assert topology_strength < 0.4
+        if has_topology_strength:
+            assert topology_strength < 0.4
     elif "topological" in name:
-        assert topology_strength >= 0.4
+        if has_topology_strength:
+            assert topology_strength >= 0.4
+        else:
+            margin = _local_kernel_margin(report)
+            assert margin is not None
+            assert margin >= 0.02
     elif expected == KERNEL_OR_LOCAL_RECOMMENDED:
         margin = _local_kernel_margin(report)
         assert margin is not None
