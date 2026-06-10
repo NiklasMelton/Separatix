@@ -75,6 +75,8 @@ By default, `diagnose(...)` returns a plain-text recommendation. With
 - preprocessing and runtime metadata
 
 The report is JSON-serializable through `report.to_dict()` and `report.to_json()`.
+The full report structure is documented in
+[docs/report.md](/Users/niklasmelton/code/Separatix/docs/report.md).
 
 ## Recommendation Categories
 
