@@ -80,6 +80,7 @@ class ComplexityProfiler:
             validated.y_encoded,
             config=self.config,
             report_context=report_context,
+            class_labels=validated.classes_,
         )
         baseline = summarize_probe_family(probes)
         neighborhood = compute_neighborhood_diagnostics(

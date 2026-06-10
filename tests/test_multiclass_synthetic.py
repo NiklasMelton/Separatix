@@ -23,6 +23,7 @@ def test_multiclass_string_labels() -> None:
     labels = np.array(["cat", "dog", "fox"])[y]
     report = diagnose(X, labels, return_report=True, random_state=0)
     assert report.class_summary["classes"] == ["cat", "dog", "fox"]
+    assert "most_confused_pairs" in report.metrics["probes"]["linear"]
 
 
 def test_multiclass_imbalance_runs() -> None:

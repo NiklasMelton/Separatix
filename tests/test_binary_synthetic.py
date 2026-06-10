@@ -37,6 +37,35 @@ def test_circles_recommend_local_or_kernel() -> None:
     }
 
 
+def test_smooth_curved_boundary_recommends_smooth_nonlinear() -> None:
+    rng = np.random.default_rng(3)
+    X = rng.uniform(-2.5, 2.5, size=(400, 2))
+    signal = X[:, 1] - 0.18 * (X[:, 0] ** 2) + 0.08 * X[:, 0]
+    y = (signal + 0.10 * rng.normal(size=400) > 0.0).astype(int)
+    report = diagnose(X, y, return_report=True, random_state=0)
+    assert report.recommendation == SMOOTH_NONLINEAR_RECOMMENDED
+    assert report.metrics["probes"]["smooth_poly"]["probe_variant"] == "full_quadratic"
+
+
+def test_low_rank_quadratic_probe_can_recommend_smooth_nonlinear() -> None:
+    rng = np.random.default_rng(20)
+    X = rng.normal(size=(1000, 20))
+    signal = 1.8 * X[:, 0] * X[:, 1] + 1.4 * X[:, 2] ** 2 - 0.4 * X[:, 3]
+    y = (signal + 0.05 * rng.normal(size=1000) > 0.4).astype(int)
+    report = diagnose(
+        X,
+        y,
+        return_report=True,
+        random_state=0,
+        topology="off",
+        max_dense_mb=1,
+    )
+    assert report.recommendation == SMOOTH_NONLINEAR_RECOMMENDED
+    assert report.metrics["probes"]["smooth_poly"]["probe_variant"] == (
+        "low_rank_quadratic"
+    )
+
+
 def test_random_labels_are_bottleneck_or_inconclusive() -> None:
     X, y = make_classification(
         n_samples=180, n_features=12, n_informative=10, random_state=0
