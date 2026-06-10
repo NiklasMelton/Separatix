@@ -49,7 +49,6 @@ def test_smooth_probe_skip_is_serialized() -> None:
     smooth = report.metrics["probes"]["smooth_poly"]
     assert smooth["skipped_reason"]
     assert any(
-        item["name"] == "smooth_nonlinear_probe"
-        for item in report.skipped_diagnostics
+        item["name"] == "smooth_nonlinear_probe" for item in report.skipped_diagnostics
     )
     assert isinstance(report.to_json(), str)
