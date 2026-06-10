@@ -73,17 +73,10 @@ def compute_scores(
     )
     fragmentation = _clip(metrics["graph"].get("graph_fragmentation_score", 0.0))
     topology = None
-    if "h1_persistence_count" in metrics["topology"]:
-        topology = _clip(
-            min(
-                1.0,
-                (
-                    metrics["topology"].get("max_h1_persistence", 0.0)
-                    + metrics["topology"].get("h1_persistence_count", 0)
-                )
-                / 5.0,
-            )
-        )
+    if "topology_strength" in metrics["topology"]:
+        topology = _clip(metrics["topology"].get("topology_strength", 0.0))
+    elif "h1_persistence_count" in metrics["topology"]:
+        topology = _clip(min(1.0, metrics["topology"].get("max_h1_persistence", 0.0)))
     min_class_count = min(metrics["audit"]["class_counts"].values())
     reliability = 1.0
     reliability -= min(0.4, skipped_count * 0.08)
@@ -121,6 +114,7 @@ def make_recommendation(
 ) -> tuple[str, str, list[str], dict[str, str]]:
     """Generate a rule-based recommendation and decision path."""
     smooth_margin_tolerance = 0.01
+    strong_topology_threshold = 0.4
     decision_path: list[str] = []
     interpretations: dict[str, str] = {}
     probes = metrics["probes"]
@@ -182,7 +176,7 @@ def make_recommendation(
                 "A smooth global nonlinear probe clearly outperformed the "
                 "local and kernel-style probes."
             )
-        elif topology >= 0.4 and (
+        elif topology >= strong_topology_threshold and (
             smooth_margin is None or smooth_margin < smooth_margin_tolerance
         ):
             recommendation = KERNEL_OR_LOCAL_RECOMMENDED
