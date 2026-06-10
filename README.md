@@ -117,6 +117,10 @@ recorded in the report.
 ## Examples
 
 - [examples/basic_breast_cancer.py](/Users/niklasmelton/code/Separatix/examples/basic_breast_cancer.py)
+- [examples/linear_hyperplane_visual.py](/Users/niklasmelton/code/Separatix/examples/linear_hyperplane_visual.py)
+- [examples/curvilinear_boundary_visual.py](/Users/niklasmelton/code/Separatix/examples/curvilinear_boundary_visual.py)
+- [examples/high_dimensional_linear_hyperplane.py](/Users/niklasmelton/code/Separatix/examples/high_dimensional_linear_hyperplane.py)
+- [examples/high_dimensional_curvilinear_hyperplane.py](/Users/niklasmelton/code/Separatix/examples/high_dimensional_curvilinear_hyperplane.py)
 - [examples/moons_vs_linear.py](/Users/niklasmelton/code/Separatix/examples/moons_vs_linear.py)
 - [examples/circles_kernel_signal.py](/Users/niklasmelton/code/Separatix/examples/circles_kernel_signal.py)
 - [examples/multiclass_wine.py](/Users/niklasmelton/code/Separatix/examples/multiclass_wine.py)
@@ -137,4 +141,3 @@ classification complexity and data geometry. In particular, would like to acknow
 
 We do not follow those procedures directly, but they are relevant background
 for why geometry-aware pretraining diagnostics are useful.
-

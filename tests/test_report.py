@@ -34,3 +34,21 @@ def test_probe_stability_fields_are_present() -> None:
     linear = report.metrics["probes"]["linear"]
     assert "stability_repeats" in linear
     assert "stability_balanced_accuracy_std" in linear
+
+
+def test_smooth_probe_skip_is_serialized() -> None:
+    X, y = make_blobs(n_samples=2000, centers=2, n_features=500, random_state=0)
+    report = diagnose(
+        X,
+        y,
+        return_report=True,
+        random_state=0,
+        topology="off",
+        max_dense_mb=1,
+    )
+    smooth = report.metrics["probes"]["smooth_poly"]
+    assert smooth["skipped_reason"]
+    assert any(
+        item["name"] == "smooth_nonlinear_probe" for item in report.skipped_diagnostics
+    )
+    assert isinstance(report.to_json(), str)

@@ -60,9 +60,14 @@ These signals are used later when estimating recommendation reliability.
 
 ### Probe Models
 
-`separatix` runs a small family of simple probes, including a dummy baseline
-and at least a linear probe. Depending on the configured budget, it may also
-run local or kernel-approximation style probes.
+`separatix` runs a small family of simple probes, including a dummy baseline,
+a linear probe, a smooth quadratic/global interaction probe, and depending on
+the configured budget, local or kernel-approximation style probes.
+
+The smooth probe uses explicit quadratic features when that expansion is still
+small and transparent. When dimensionality makes full quadratic expansion too
+expensive, it can fall back to a low-rank polynomial-kernel approximation
+instead of materializing every pairwise interaction.
 
 The probe family is not treated as a model-selection tournament. Instead, probe
 performance is used as evidence about the shape of the class boundary:
