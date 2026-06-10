@@ -11,6 +11,17 @@ from separatix.constants import BUDGETS
 from separatix.densify import ensure_dense_or_sample
 
 
+def _boundary_scale(X: np.ndarray) -> float:
+    """Return a simple coordinate-scale proxy for normalized persistence."""
+    if X.size == 0:
+        return 0.0
+    ranges = np.ptp(X, axis=0)
+    positive_ranges = ranges[ranges > 0]
+    if positive_ranges.size == 0:
+        return 0.0
+    return float(np.mean(positive_ranges))
+
+
 def compute_topology_diagnostics(
     X: Any,
     y: np.ndarray,
@@ -89,6 +100,11 @@ def compute_topology_diagnostics(
     h0_lifetimes = h0[:, 1] - h0[:, 0] if h0.size else np.array([])
     finite_h0 = h0_lifetimes[np.isfinite(h0_lifetimes)]
     finite_h1 = h1_lifetimes[np.isfinite(h1_lifetimes)]
+    max_h1 = float(np.max(finite_h1)) if finite_h1.size else 0.0
+    total_h1 = float(np.sum(finite_h1)) if finite_h1.size else 0.0
+    scale = _boundary_scale(dense_info["X"])
+    relative_h1 = float(max_h1 / max(scale, 1e-12)) if scale > 0 else 0.0
+    topology_strength = float(np.clip((relative_h1 - 0.08) / 0.25, 0.0, 1.0))
     return {
         "mode": config.topology,
         "h0_persistence_count": int(
@@ -98,8 +114,11 @@ def compute_topology_diagnostics(
             np.sum(finite_h1 > np.median(finite_h1) if finite_h1.size else 0)
         ),
         "total_h0_persistence": float(np.sum(finite_h0)) if finite_h0.size else 0.0,
-        "total_h1_persistence": float(np.sum(finite_h1)) if finite_h1.size else 0.0,
-        "max_h1_persistence": float(np.max(finite_h1)) if finite_h1.size else 0.0,
+        "total_h1_persistence": total_h1,
+        "max_h1_persistence": max_h1,
+        "boundary_scale": scale,
+        "relative_h1_persistence": relative_h1,
+        "topology_strength": topology_strength,
         "persistence_entropy": float(
             -np.sum(
                 (finite_h1 / np.sum(finite_h1))
