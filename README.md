@@ -126,8 +126,7 @@ recorded in the report.
 
 This package is not an implementation of a published dataset-complexity
 procedure, but the project is adjacent to and inspired by prior work on
-classification complexity and data geometry. In particular, the documentation
-should acknowledge:
+classification complexity and data geometry. In particular, would like to acknowledge:
 
 - Ho and Basu, "Complexity Measures of Supervised Classification Problems"
   ([PDF](https://sci2s.ugr.es/keel/pdf/algorithm/articulo/2002-IEEE-TPAMI-Ho-DC.pdf))
@@ -139,10 +138,3 @@ should acknowledge:
 We do not follow those procedures directly, but they are relevant background
 for why geometry-aware pretraining diagnostics are useful.
 
-## Development
-
-```bash
-poetry run pytest
-poetry run ruff check separatix tests
-poetry run mypy separatix
-```
