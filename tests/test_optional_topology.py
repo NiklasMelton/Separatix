@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from sklearn.datasets import make_blobs
 
 from separatix import diagnose
