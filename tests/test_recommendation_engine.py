@@ -171,9 +171,9 @@ def test_recommendation_engine_keeps_smooth_when_kernel_margin_is_borderline() -
     assert path
     assert evidence["raw_best_family"] == "local_kernel"
     assert evidence["recommended_family"] == "smooth_nonlinear"
-    assert not evidence["family_comparisons"][
-        "local_kernel_vs_smooth_nonlinear"
-    ]["first_clearly_better"]
+    assert not evidence["family_comparisons"]["local_kernel_vs_smooth_nonlinear"][
+        "first_clearly_better"
+    ]
     assert any(
         flag["name"] == "borderline_family_difference"
         for flag in evidence["quality_flags"]
@@ -207,6 +207,7 @@ def test_recommendation_engine_keeps_linear_within_one_standard_error() -> None:
     scores = compute_scores(metrics, skipped_count=0, warning_count=0)
     recommendation, _, _, _ = make_recommendation(scores, metrics)
     assert recommendation == "linear_likely_sufficient"
-    assert "conservative escalation" in metrics["recommendation_evidence"][
-        "selection_rule"
-    ]
+    assert (
+        "conservative escalation"
+        in metrics["recommendation_evidence"]["selection_rule"]
+    )
