@@ -96,9 +96,7 @@ def _bootstrap_fragmentation(
         "graph_fragmentation_bootstrap_mean": float(np.mean(scores))
         if scores
         else None,
-        "graph_fragmentation_bootstrap_std": float(np.std(scores))
-        if scores
-        else None,
+        "graph_fragmentation_bootstrap_std": float(np.std(scores)) if scores else None,
     }
 
 

@@ -113,9 +113,7 @@ def _balanced_accuracy_standard_error(
 
     if recall_values and class_counts:
         variance = sum(
-            recall
-            * (MAX_NORMALIZED_SCORE - recall)
-            / max(1, class_counts[index])
+            recall * (MAX_NORMALIZED_SCORE - recall) / max(1, class_counts[index])
             for index, recall in enumerate(recall_values)
         ) / (len(recall_values) ** 2)
         class_aware_error = sqrt(max(MIN_NORMALIZED_SCORE, variance))
@@ -143,9 +141,7 @@ def _probe_evidence(
                 name=name,
                 family=family,
                 score=float(result["balanced_accuracy"]),
-                standard_error=_balanced_accuracy_standard_error(
-                    result, class_counts
-                ),
+                standard_error=_balanced_accuracy_standard_error(result, class_counts),
                 evaluation_mode=result.get("evaluation_mode"),
                 stability_standard_deviation=_numeric(
                     result.get("stability_balanced_accuracy_std")
@@ -166,9 +162,7 @@ def _best_probe_for_family(
     family: str,
     probes: dict[str, _ProbeEvidence],
 ) -> _ProbeEvidence | None:
-    candidates = [
-        probes[name] for name in _FAMILY_PROBES[family] if name in probes
-    ]
+    candidates = [probes[name] for name in _FAMILY_PROBES[family] if name in probes]
     if not candidates:
         return None
     return max(candidates, key=lambda item: item.score)
@@ -348,9 +342,7 @@ def _geometry_evidence(metrics: dict[str, Any]) -> dict[str, Any]:
             if overlap_vs_label_shuffle is not None
             else None
         ),
-        "graph_fragmentation_score": _numeric(
-            graph.get("graph_fragmentation_score")
-        ),
+        "graph_fragmentation_score": _numeric(graph.get("graph_fragmentation_score")),
         "graph_fragmentation_bootstrap_repeats": graph.get(
             "graph_fragmentation_bootstrap_repeats"
         ),
@@ -601,9 +593,7 @@ def _build_recommendation_evidence(
             else None
         ),
         "best_clearly_beats_dummy": best_clearly_beats_dummy,
-        "family_comparisons": {
-            "local_kernel_vs_smooth_nonlinear": smooth_vs_local
-        },
+        "family_comparisons": {"local_kernel_vs_smooth_nonlinear": smooth_vs_local},
         "geometry": _geometry_evidence(metrics),
         "quality_flags": quality_flags,
         "quality_score": _quality_score(quality_flags),
@@ -644,10 +634,7 @@ def _score_from_evidence(
         )
     )
     signal = (
-        _clip(
-            (best - dummy)
-            / max(NORMALIZATION_EPSILON, MAX_NORMALIZED_SCORE - dummy)
-        )
+        _clip((best - dummy) / max(NORMALIZATION_EPSILON, MAX_NORMALIZED_SCORE - dummy))
         if best is not None and dummy is not None
         else None
     )
@@ -694,15 +681,13 @@ def compute_scores(
 
 def _has_blocking_quality_flag(evidence: dict[str, Any]) -> bool:
     return any(
-        flag.get("severity") == "blocking"
-        for flag in evidence.get("quality_flags", [])
+        flag.get("severity") == "blocking" for flag in evidence.get("quality_flags", [])
     )
 
 
 def _has_caution_quality_flag(evidence: dict[str, Any]) -> bool:
     return any(
-        flag.get("severity") == "caution"
-        for flag in evidence.get("quality_flags", [])
+        flag.get("severity") == "caution" for flag in evidence.get("quality_flags", [])
     )
 
 
@@ -717,13 +702,10 @@ def _weak_signal_recommendation(evidence: dict[str, Any]) -> str:
 def _recommend_selected_family(evidence: dict[str, Any]) -> str:
     selected_family = evidence.get("selected_family")
     if selected_family == "local_kernel":
-        comparison = evidence["family_comparisons"][
-            "local_kernel_vs_smooth_nonlinear"
-        ]
+        comparison = evidence["family_comparisons"]["local_kernel_vs_smooth_nonlinear"]
         local_clearly_better = bool(comparison.get("first_clearly_better"))
-        if (
-            local_clearly_better
-            and evidence["geometry"].get("boundary_fragmentation_supported")
+        if local_clearly_better and evidence["geometry"].get(
+            "boundary_fragmentation_supported"
         ):
             return HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
     if selected_family in _FAMILY_RECOMMENDATIONS:

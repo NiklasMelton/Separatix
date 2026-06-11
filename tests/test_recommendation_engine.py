@@ -93,9 +93,7 @@ def test_recommendation_engine_prefers_simpler_smooth_when_scores_tie() -> None:
     assert recommendation == "smooth_nonlinear_recommended"
     assert confidence in {"medium", "high"}
     assert path
-    assert metrics["recommendation_evidence"]["selected_family"] == (
-        "smooth_nonlinear"
-    )
+    assert metrics["recommendation_evidence"]["selected_family"] == ("smooth_nonlinear")
 
 
 def test_recommendation_engine_prefers_kernel_local_when_it_clearly_wins() -> None:
