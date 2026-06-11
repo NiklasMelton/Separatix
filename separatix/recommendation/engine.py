@@ -16,11 +16,76 @@ from separatix.constants import (
     SMOOTH_NONLINEAR_RECOMMENDED,
 )
 
+# Lowest normalized score returned by recommendation score helpers.
+MIN_NORMALIZED_SCORE = 0.0
+# Highest normalized score returned by recommendation score helpers.
+MAX_NORMALIZED_SCORE = 1.0
+# Small denominator guard used when normalizing probe improvements.
+NORMALIZATION_EPSILON = 1e-9
+# Maximum reliability penalty assigned for skipped diagnostics.
+MAX_SKIPPED_DIAGNOSTIC_PENALTY = 0.4
+# Reliability penalty added for each skipped diagnostic.
+SKIPPED_DIAGNOSTIC_PENALTY = 0.08
+# Maximum reliability penalty assigned for reported warnings.
+MAX_WARNING_PENALTY = 0.2
+# Reliability penalty added for each reported warning.
+WARNING_PENALTY = 0.05
+# Reliability penalty for concentrated distances in high-dimensional geometry.
+DISTANCE_CONCENTRATION_PENALTY = 0.15
+# Distance concentration threshold below which geometry is less reliable.
+DISTANCE_CONCENTRATION_THRESHOLD = 0.08
+# Reliability penalty when the smallest class has too few samples.
+SMALL_CLASS_PENALTY = 0.15
+# Minimum per-class sample count before class-size reliability is penalized.
+MIN_RELIABLE_CLASS_COUNT = 5
+# Reliability penalty when class imbalance is substantial.
+IMBALANCE_PENALTY = 0.1
+# Imbalance ratio above which recommendation reliability is reduced.
+HIGH_IMBALANCE_RATIO = 10
+# Minimum absolute boundary sample count needed for boundary guidance.
+MIN_BOUNDARY_SAMPLE_SIZE = 10
+# Multiplier for the class-aware minimum boundary sample size.
+BOUNDARY_SAMPLE_CLASS_MULTIPLIER = 2
+# Reliability penalty when boundary sampling is too small.
+SMALL_BOUNDARY_SAMPLE_PENALTY = 0.1
+# Maximum reliability penalty assigned for unstable linear probe scores.
+MAX_LINEAR_STABILITY_PENALTY = 0.15
+# Converts linear probe standard deviation into a reliability penalty.
+LINEAR_STABILITY_PENALTY_SCALE = 0.5
+# Reliability penalty when essential probe scores are unavailable.
+MISSING_ESSENTIAL_PROBE_PENALTY = 0.3
+# Reliability threshold below which geometry-heavy guidance is not trusted.
+LOW_RELIABILITY_THRESHOLD = 0.35
+# Signal threshold below which usable label signal is considered weak.
+WEAK_SIGNAL_THRESHOLD = 0.2
+# Linearity threshold for treating a linear model as likely sufficient.
+LINEAR_SUFFICIENCY_THRESHOLD = 0.93
+# Nonlinearity threshold below which nonlinear gain is considered negligible.
+LOW_NONLINEARITY_GAIN_THRESHOLD = 0.08
+# Overlap threshold for flagging class mixing as a likely bottleneck.
+HIGH_OVERLAP_THRESHOLD = 0.6
+# Nonlinearity threshold used with high overlap to indicate limited gain.
+OVERLAP_NONLINEARITY_GAIN_THRESHOLD = 0.12
+# Nonlinearity threshold for entering the nonlinear recommendation branch.
+MEANINGFUL_NONLINEARITY_GAIN_THRESHOLD = 0.18
+# Fragmentation threshold for recommending higher-capacity partitioning.
+HIGH_FRAGMENTATION_THRESHOLD = 0.55
+# Smooth-probe margin treated as clearly better than local/kernel probes.
+SMOOTH_MARGIN_TOLERANCE = 0.01
+# Topology score threshold for emphasizing local/kernel-style models.
+STRONG_TOPOLOGY_THRESHOLD = 0.4
+# Reliability threshold used for high-confidence recommendations.
+HIGH_CONFIDENCE_RELIABILITY_THRESHOLD = 0.8
+# Signal threshold used for high-confidence recommendations.
+HIGH_CONFIDENCE_SIGNAL_THRESHOLD = 0.5
+# Reliability threshold used for medium-confidence recommendations.
+MEDIUM_CONFIDENCE_RELIABILITY_THRESHOLD = 0.55
+
 
 def _clip(value: float | None) -> float | None:
     if value is None:
         return None
-    return float(np.clip(value, 0.0, 1.0))
+    return float(np.clip(value, MIN_NORMALIZED_SCORE, MAX_NORMALIZED_SCORE))
 
 
 def compute_scores(
@@ -48,56 +113,95 @@ def compute_scores(
         else None
     )
     signal = (
-        _clip((best_available - dummy) / max(1e-9, 1.0 - dummy))
+        _clip(
+            (best_available - dummy)
+            / max(NORMALIZATION_EPSILON, MAX_NORMALIZED_SCORE - dummy)
+        )
         if best_available is not None and dummy is not None
         else None
     )
     overlap = _clip(
         np.mean(
             [
-                metrics["neighborhood"].get("mean_local_entropy", 0.0),
-                metrics["neighborhood"].get("high_entropy_fraction", 0.0),
-                metrics["neighborhood"].get("cross_class_neighbor_fraction", 0.0),
+                metrics["neighborhood"].get(
+                    "mean_local_entropy", MIN_NORMALIZED_SCORE
+                ),
+                metrics["neighborhood"].get(
+                    "high_entropy_fraction", MIN_NORMALIZED_SCORE
+                ),
+                metrics["neighborhood"].get(
+                    "cross_class_neighbor_fraction", MIN_NORMALIZED_SCORE
+                ),
             ]
         )
     )
     linearity = (
-        _clip(linear / max(best_available, 1e-9))
+        _clip(linear / max(best_available, NORMALIZATION_EPSILON))
         if linear is not None and best_available is not None
         else None
     )
     nonlinear = (
-        _clip((best_nonlinear - linear) / max(1e-9, 1.0 - linear))
+        _clip(
+            (best_nonlinear - linear)
+            / max(NORMALIZATION_EPSILON, MAX_NORMALIZED_SCORE - linear)
+        )
         if linear is not None and best_nonlinear is not None
         else None
     )
-    fragmentation = _clip(metrics["graph"].get("graph_fragmentation_score", 0.0))
+    fragmentation = _clip(
+        metrics["graph"].get("graph_fragmentation_score", MIN_NORMALIZED_SCORE)
+    )
     topology = None
     if "topology_strength" in metrics["topology"]:
-        topology = _clip(metrics["topology"].get("topology_strength", 0.0))
+        topology = _clip(
+            metrics["topology"].get("topology_strength", MIN_NORMALIZED_SCORE)
+        )
     elif "h1_persistence_count" in metrics["topology"]:
-        topology = _clip(min(1.0, metrics["topology"].get("max_h1_persistence", 0.0)))
+        topology = _clip(
+            min(
+                MAX_NORMALIZED_SCORE,
+                metrics["topology"].get(
+                    "max_h1_persistence", MIN_NORMALIZED_SCORE
+                ),
+            )
+        )
     min_class_count = min(metrics["audit"]["class_counts"].values())
-    reliability = 1.0
-    reliability -= min(0.4, skipped_count * 0.08)
-    reliability -= min(0.2, warning_count * 0.05)
-    reliability -= (
-        0.15
-        if metrics["geometry"].get("distance_concentration_proxy") is not None
-        and metrics["geometry"]["distance_concentration_proxy"] < 0.08
-        else 0.0
+    reliability = MAX_NORMALIZED_SCORE
+    reliability -= min(
+        MAX_SKIPPED_DIAGNOSTIC_PENALTY,
+        skipped_count * SKIPPED_DIAGNOSTIC_PENALTY,
     )
-    reliability -= 0.15 if min_class_count < 5 else 0.0
-    reliability -= 0.1 if metrics["audit"]["imbalance_ratio"] > 10 else 0.0
+    reliability -= min(MAX_WARNING_PENALTY, warning_count * WARNING_PENALTY)
+    reliability -= (
+        DISTANCE_CONCENTRATION_PENALTY
+        if metrics["geometry"].get("distance_concentration_proxy") is not None
+        and metrics["geometry"]["distance_concentration_proxy"]
+        < DISTANCE_CONCENTRATION_THRESHOLD
+        else MIN_NORMALIZED_SCORE
+    )
+    reliability -= (
+        SMALL_CLASS_PENALTY
+        if min_class_count < MIN_RELIABLE_CLASS_COUNT
+        else MIN_NORMALIZED_SCORE
+    )
+    reliability -= (
+        IMBALANCE_PENALTY
+        if metrics["audit"]["imbalance_ratio"] > HIGH_IMBALANCE_RATIO
+        else MIN_NORMALIZED_SCORE
+    )
     if metrics["boundary"]["boundary_sample_size"] < max(
-        10, metrics["audit"]["n_classes"] * 2
+        MIN_BOUNDARY_SAMPLE_SIZE,
+        metrics["audit"]["n_classes"] * BOUNDARY_SAMPLE_CLASS_MULTIPLIER,
     ):
-        reliability -= 0.1
+        reliability -= SMALL_BOUNDARY_SAMPLE_PENALTY
     linear_stability = probes.get("linear", {}).get("stability_balanced_accuracy_std")
     if linear_stability is not None:
-        reliability -= min(0.15, float(linear_stability) * 0.5)
+        reliability -= min(
+            MAX_LINEAR_STABILITY_PENALTY,
+            float(linear_stability) * LINEAR_STABILITY_PENALTY_SCALE,
+        )
     if best_available is None or linear is None:
-        reliability -= 0.3
+        reliability -= MISSING_ESSENTIAL_PROBE_PENALTY
     return {
         "signal_score": signal,
         "overlap_score": overlap,
@@ -113,39 +217,43 @@ def make_recommendation(
     scores: dict[str, float | None], metrics: dict[str, Any]
 ) -> tuple[str, str, list[str], dict[str, str]]:
     """Generate a rule-based recommendation and decision path."""
-    smooth_margin_tolerance = 0.01
-    strong_topology_threshold = 0.4
     decision_path: list[str] = []
     interpretations: dict[str, str] = {}
     probes = metrics["probes"]
-    reliability = scores["reliability_score"] or 0.0
-    signal = scores["signal_score"] or 0.0
-    nonlinearity = scores["nonlinearity_score"] or 0.0
-    linearity = scores["linearity_score"] or 0.0
-    overlap = scores["overlap_score"] or 0.0
-    fragmentation = scores["fragmentation_score"] or 0.0
-    topology = scores["topology_score"] or 0.0
+    reliability = scores["reliability_score"] or MIN_NORMALIZED_SCORE
+    signal = scores["signal_score"] or MIN_NORMALIZED_SCORE
+    nonlinearity = scores["nonlinearity_score"] or MIN_NORMALIZED_SCORE
+    linearity = scores["linearity_score"] or MIN_NORMALIZED_SCORE
+    overlap = scores["overlap_score"] or MIN_NORMALIZED_SCORE
+    fragmentation = scores["fragmentation_score"] or MIN_NORMALIZED_SCORE
+    topology = scores["topology_score"] or MIN_NORMALIZED_SCORE
 
-    if reliability < 0.35:
+    if reliability < LOW_RELIABILITY_THRESHOLD:
         recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
         decision_path.append(
             "Reliability was too low to trust geometry-heavy guidance."
         )
-    elif signal < 0.2:
+    elif signal < WEAK_SIGNAL_THRESHOLD:
         recommendation = FEATURE_OR_LABEL_BOTTLENECK_LIKELY
         decision_path.append(
             "All probes were close to the dummy baseline, "
             "suggesting weak usable signal."
         )
-    elif linearity >= 0.93 and nonlinearity < 0.08:
+    elif (
+        linearity >= LINEAR_SUFFICIENCY_THRESHOLD
+        and nonlinearity < LOW_NONLINEARITY_GAIN_THRESHOLD
+    ):
         recommendation = LINEAR_LIKELY_SUFFICIENT
         decision_path.append(
             "The linear probe performed close to the best available probe."
         )
-    elif overlap > 0.6 and nonlinearity < 0.12:
+    elif (
+        overlap > HIGH_OVERLAP_THRESHOLD
+        and nonlinearity < OVERLAP_NONLINEARITY_GAIN_THRESHOLD
+    ):
         recommendation = FEATURE_OR_LABEL_BOTTLENECK_LIKELY
         decision_path.append("Local overlap was high without much nonlinear gain.")
-    elif nonlinearity >= 0.18:
+    elif nonlinearity >= MEANINGFUL_NONLINEARITY_GAIN_THRESHOLD:
         best_probe = metrics["baseline"]["best_probe"]
         smooth_score = probes.get("smooth_poly", {}).get("balanced_accuracy")
         knn_score = probes.get("knn", {}).get("balanced_accuracy")
@@ -163,21 +271,21 @@ def make_recommendation(
             "Best nonlinear probe improved over the linear probe, "
             f"with {best_probe} performing best."
         )
-        if fragmentation >= 0.55:
+        if fragmentation >= HIGH_FRAGMENTATION_THRESHOLD:
             recommendation = HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
             decision_path.append("Boundary graph fragmentation was high.")
         elif smooth_score is not None and (
             best_local_kernel is None
             or smooth_margin is not None
-            and smooth_margin >= smooth_margin_tolerance
+            and smooth_margin >= SMOOTH_MARGIN_TOLERANCE
         ):
             recommendation = SMOOTH_NONLINEAR_RECOMMENDED
             decision_path.append(
                 "A smooth global nonlinear probe clearly outperformed the "
                 "local and kernel-style probes."
             )
-        elif topology >= strong_topology_threshold and (
-            smooth_margin is None or smooth_margin < smooth_margin_tolerance
+        elif topology >= STRONG_TOPOLOGY_THRESHOLD and (
+            smooth_margin is None or smooth_margin < SMOOTH_MARGIN_TOLERANCE
         ):
             recommendation = KERNEL_OR_LOCAL_RECOMMENDED
             decision_path.append(
@@ -186,7 +294,7 @@ def make_recommendation(
         elif (
             smooth_score is not None
             and smooth_margin is not None
-            and smooth_margin >= -smooth_margin_tolerance
+            and smooth_margin >= -SMOOTH_MARGIN_TOLERANCE
         ):
             recommendation = SMOOTH_NONLINEAR_RECOMMENDED
             decision_path.append(
@@ -211,9 +319,10 @@ def make_recommendation(
 
     confidence = (
         "high"
-        if reliability >= 0.8 and signal >= 0.5
+        if reliability >= HIGH_CONFIDENCE_RELIABILITY_THRESHOLD
+        and signal >= HIGH_CONFIDENCE_SIGNAL_THRESHOLD
         else "medium"
-        if reliability >= 0.55
+        if reliability >= MEDIUM_CONFIDENCE_RELIABILITY_THRESHOLD
         else "low"
     )
     interpretations["signal"] = (
