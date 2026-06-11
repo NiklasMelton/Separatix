@@ -68,6 +68,7 @@ By default, `diagnose(...)` returns a plain-text recommendation. With
 - plain-text recommendation text
 - confidence level
 - underlying metric groups
+- probe-family evidence, including uncertainty-aware family comparisons
 - normalized summary scores
 - a visible decision path
 - warnings and skipped diagnostics
@@ -89,19 +90,32 @@ The report is JSON-serializable through `report.to_dict()` and `report.to_json()
 These categories are intentionally coarse. They describe the apparent geometry
 and difficulty of the labeled feature space, not a guaranteed best model choice.
 
+The synthetic recommendation ladder below shows how `separatix` responds as the
+designed dataset geometry moves from simple linear structure toward smoother
+nonlinearity, local or kernel-like structure, fragmented boundaries, and
+finally weak-signal or random-label bottlenecks. The x-axis is the intended
+dataset complexity, while the y-axis is the coarse recommendation level
+reported by `separatix`.
+
+![separatix recommendation complexity ladder](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_recommendation_complexity_ladder.png)
+
 ## Decision Pipeline
 
 The recommendation is produced by a fixed, inspectable pipeline:
 
 1. Validate inputs and encode labels.
 2. Audit class counts, imbalance, sparsity, and basic dataset conditions.
-3. Compute geometry, neighborhood, and boundary-related diagnostics.
+3. Compute geometry, neighborhood, boundary, fragmentation, and optional
+   topology diagnostics.
 4. Run simple probe models and compare them to a dummy baseline.
-5. Aggregate the raw metrics into normalized scores such as signal,
-   linearity, nonlinearity, overlap, fragmentation, and reliability.
-6. Apply explicit rule-based branching to map those scores to a recommendation
-   category and confidence level.
-7. Render both a plain-language summary and a structured report.
+5. Build probe-family evidence with uncertainty estimates for `linear`,
+   `smooth_nonlinear`, and `local_kernel`.
+6. Apply a 95% signal-vs-dummy gate before making any model-family
+   recommendation.
+7. Use conservative escalation: keep the simpler family unless a more complex
+   family has a clear uncertainty-adjusted advantage.
+8. Render both a plain-language summary and a structured report, including
+   `raw_best_family` and `recommended_family` when a report is requested.
 
 The full rationale and decision rules are documented in
 [docs/decision_pipeline.md](/Users/niklasmelton/code/Separatix/docs/decision_pipeline.md).
@@ -123,6 +137,7 @@ recorded in the report.
 - [examples/high_dimensional_curvilinear_hyperplane.py](/Users/niklasmelton/code/Separatix/examples/high_dimensional_curvilinear_hyperplane.py)
 - [examples/moons_vs_linear.py](/Users/niklasmelton/code/Separatix/examples/moons_vs_linear.py)
 - [examples/circles_kernel_signal.py](/Users/niklasmelton/code/Separatix/examples/circles_kernel_signal.py)
+- [examples/recommendation_complexity_ladder.py](/Users/niklasmelton/code/Separatix/examples/recommendation_complexity_ladder.py)
 - [examples/multiclass_wine.py](/Users/niklasmelton/code/Separatix/examples/multiclass_wine.py)
 - [examples/sparse_text_like_embeddings.py](/Users/niklasmelton/code/Separatix/examples/sparse_text_like_embeddings.py)
 

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "separatix"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Diagnostic profiling of labeled embeddings for classification model complexity guidance."
 authors = ["Niklas Melton <niklas@example.com>"]
 readme = "README.md"
