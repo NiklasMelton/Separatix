@@ -19,6 +19,8 @@ def test_report_serializes_recommendation_evidence() -> None:
     evidence = report.to_dict()["metrics"]["recommendation_evidence"]
     assert evidence["selection_rule"]
     assert evidence["probe_table"]
+    assert "raw_best_family" in evidence
+    assert "recommended_family" in evidence
     assert "linear" in evidence["families"]
     assert "quality_flags" in evidence
     assert "graph_fragmentation_bootstrap_repeats" in evidence["geometry"]

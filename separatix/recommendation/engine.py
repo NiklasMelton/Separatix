@@ -235,23 +235,17 @@ def _combined_standard_error(
     return float(sqrt(first.standard_error**2 + second.standard_error**2))
 
 
-def _one_standard_error_family(
-    families: dict[str, _FamilyEvidence],
+def _family_within_one_standard_error(
+    family: _FamilyEvidence,
     best_family: _FamilyEvidence,
-) -> str | None:
-    if best_family.score is None:
-        return None
-    for family_name in _FAMILY_ORDER:
-        family = families[family_name]
-        if family.score is None:
-            continue
-        combined_error = _combined_standard_error(family, best_family)
-        tolerance = ONE_STANDARD_ERROR * (
-            combined_error if combined_error is not None else MIN_NORMALIZED_SCORE
-        )
-        if best_family.score - family.score <= tolerance:
-            return family_name
-    return None
+) -> bool:
+    if family.score is None or best_family.score is None:
+        return False
+    combined_error = _combined_standard_error(family, best_family)
+    tolerance = ONE_STANDARD_ERROR * (
+        combined_error if combined_error is not None else MIN_NORMALIZED_SCORE
+    )
+    return bool(best_family.score - family.score <= tolerance)
 
 
 def _family_comparison(
@@ -264,20 +258,48 @@ def _family_comparison(
             "second_family": second.family,
             "score_gap": None,
             "combined_standard_error": None,
+            "z_score": None,
             "first_clearly_better": False,
             "second_clearly_better": False,
         }
     combined_error = _combined_standard_error(first, second)
     score_gap = first.score - second.score
     tolerance = combined_error or MIN_NORMALIZED_SCORE
+    z_score = score_gap / tolerance if tolerance > 0 else None
     return {
         "first_family": first.family,
         "second_family": second.family,
         "score_gap": float(score_gap),
         "combined_standard_error": combined_error,
-        "first_clearly_better": bool(score_gap > tolerance),
-        "second_clearly_better": bool(-score_gap > tolerance),
+        "z_score": float(z_score) if z_score is not None else None,
+        "clear_advantage_z": SIGNAL_CONFIDENCE_Z,
+        "first_clearly_better": bool(score_gap > SIGNAL_CONFIDENCE_Z * tolerance),
+        "second_clearly_better": bool(-score_gap > SIGNAL_CONFIDENCE_Z * tolerance),
     }
+
+
+def _recommended_family(
+    families: dict[str, _FamilyEvidence],
+    raw_best_family: _FamilyEvidence | None,
+) -> str | None:
+    """Choose a family by conservative escalation from simpler to more complex."""
+    if raw_best_family is None:
+        return None
+    linear = families["linear"]
+    smooth = families["smooth_nonlinear"]
+    local = families["local_kernel"]
+
+    if _family_within_one_standard_error(linear, raw_best_family):
+        return "linear"
+    if smooth.score is None:
+        return local.family if local.score is not None else raw_best_family.family
+    if local.score is None:
+        return smooth.family
+
+    local_vs_smooth = _family_comparison(local, smooth)
+    if local_vs_smooth["first_clearly_better"]:
+        return local.family
+    return smooth.family
 
 
 def _topology_score(metrics: dict[str, Any]) -> float | None:
@@ -481,6 +503,27 @@ def _quality_flags(
                 ),
             }
         )
+    local_vs_smooth = _family_comparison(
+        families["local_kernel"], families["smooth_nonlinear"]
+    )
+    local_score = families["local_kernel"].score
+    smooth_score = families["smooth_nonlinear"].score
+    if (
+        local_score is not None
+        and smooth_score is not None
+        and local_score > smooth_score
+        and not local_vs_smooth["first_clearly_better"]
+    ):
+        flags.append(
+            {
+                "name": "borderline_family_difference",
+                "severity": "caution",
+                "message": (
+                    "Local/kernel probes were numerically best but did not clearly "
+                    "beat the smooth nonlinear family."
+                ),
+            }
+        )
     return flags
 
 
@@ -491,6 +534,7 @@ def _quality_score(flags: list[dict[str, Any]]) -> float:
         "missing_predictive_probe",
         "resubstitution_evaluation",
         "weak_signal_evidence",
+        "borderline_family_difference",
         "geometry_diagnostics_unavailable",
     ]
     failed_checks = {flag["name"] for flag in flags}
@@ -527,29 +571,34 @@ def _build_recommendation_evidence(
 ) -> dict[str, Any]:
     probes = _probe_evidence(metrics)
     families = _family_evidence(probes)
-    best_family = _best_predictive_family(families)
+    raw_best_family = _best_predictive_family(families)
     dummy_family = families["dummy"]
-    selected_family = (
-        _one_standard_error_family(families, best_family)
-        if best_family is not None
-        else None
-    )
-    signal_error = _combined_standard_error(best_family, dummy_family)
+    candidate_family = _recommended_family(families, raw_best_family)
+    signal_error = _combined_standard_error(raw_best_family, dummy_family)
     best_clearly_beats_dummy = (
         bool(
-            best_family is not None
-            and best_family.score is not None
+            raw_best_family is not None
+            and raw_best_family.score is not None
             and dummy_family.score is not None
             and signal_error is not None
-            and best_family.score - dummy_family.score
+            and raw_best_family.score - dummy_family.score
             > SIGNAL_CONFIDENCE_Z * signal_error
         )
         if dummy_family.available
         else False
     )
+    recommended_family = candidate_family if best_clearly_beats_dummy else None
 
     smooth_vs_local = _family_comparison(
         families["local_kernel"], families["smooth_nonlinear"]
+    )
+    raw_best_vs_recommended = (
+        _family_comparison(
+            families[raw_best_family.family],
+            families[recommended_family],
+        )
+        if raw_best_family is not None and recommended_family is not None
+        else None
     )
     quality_flags = _quality_flags(
         metrics,
@@ -557,10 +606,10 @@ def _build_recommendation_evidence(
         families,
         skipped_count=skipped_count,
         warning_count=warning_count,
-        best_family=best_family,
+        best_family=raw_best_family,
         dummy_family=dummy_family,
     )
-    best_score = best_family.score if best_family is not None else None
+    best_score = raw_best_family.score if raw_best_family is not None else None
     dummy_score = dummy_family.score
     signal_margin = (
         best_score - dummy_score
@@ -570,17 +619,26 @@ def _build_recommendation_evidence(
 
     return {
         "selection_rule": (
-            "Choose the simplest predictive probe family within one standard "
-            "error of the best observed family using pairwise combined "
-            "uncertainty."
+            "Use conservative escalation: keep simpler probe families unless "
+            "a more complex family has a clear uncertainty-adjusted advantage."
         ),
         "standard_error_multiplier": ONE_STANDARD_ERROR,
         "signal_confidence_z": SIGNAL_CONFIDENCE_Z,
         "probe_table": _probe_table(probes),
         "families": _family_table(families),
-        "best_family": best_family.family if best_family is not None else None,
-        "best_probe": best_family.best_probe if best_family is not None else None,
-        "selected_family": selected_family,
+        "raw_best_family": raw_best_family.family
+        if raw_best_family is not None
+        else None,
+        "raw_best_probe": raw_best_family.best_probe
+        if raw_best_family is not None
+        else None,
+        "candidate_family": candidate_family,
+        "recommended_family": recommended_family,
+        "best_family": raw_best_family.family if raw_best_family is not None else None,
+        "best_probe": raw_best_family.best_probe
+        if raw_best_family is not None
+        else None,
+        "selected_family": recommended_family,
         "signal_margin_over_dummy": (
             float(signal_margin) if signal_margin is not None else None
         ),
@@ -593,7 +651,10 @@ def _build_recommendation_evidence(
             else None
         ),
         "best_clearly_beats_dummy": best_clearly_beats_dummy,
-        "family_comparisons": {"local_kernel_vs_smooth_nonlinear": smooth_vs_local},
+        "family_comparisons": {
+            "local_kernel_vs_smooth_nonlinear": smooth_vs_local,
+            "raw_best_vs_recommended": raw_best_vs_recommended,
+        },
         "geometry": _geometry_evidence(metrics),
         "quality_flags": quality_flags,
         "quality_score": _quality_score(quality_flags),
@@ -764,11 +825,11 @@ def make_recommendation(
             "against the class-prior dummy baseline."
         )
     else:
-        best_family = evidence["best_family"]
-        selected_family = evidence["selected_family"]
+        raw_best_family = evidence["raw_best_family"]
+        selected_family = evidence["recommended_family"]
         decision_path.append(
-            "Probe families were compared with a one-standard-error rule: "
-            f"best={best_family}, selected={selected_family}."
+            "Probe families were compared with conservative escalation: "
+            f"raw_best={raw_best_family}, recommended={selected_family}."
         )
         recommendation = _recommend_selected_family(evidence)
         if selected_family == "linear":
@@ -778,13 +839,13 @@ def make_recommendation(
             )
         elif selected_family == "smooth_nonlinear":
             decision_path.append(
-                "Nonlinear probes improved over linear, and the smooth nonlinear "
-                "family was the simplest family within one standard error of best."
+                "Nonlinear probes improved over linear, and local/kernel probes "
+                "did not clearly beat the smooth nonlinear family."
             )
         elif selected_family == "local_kernel":
             decision_path.append(
-                "Local or kernel-style probes were the simplest family within one "
-                "standard error of best."
+                "Local or kernel-style probes clearly outperformed the smooth "
+                "nonlinear family after uncertainty adjustment."
             )
             if evidence["geometry"].get("topology_score") is not None:
                 decision_path.append(
@@ -829,8 +890,8 @@ def make_recommendation(
     )
     interpretations["recommendation_evidence"] = (
         "Probe-family scores are shown as balanced accuracy plus or minus an "
-        "estimated standard error; selection uses the simplest family within "
-        "one standard error of the best family."
+        "estimated standard error; selection uses conservative escalation from "
+        "simpler to more complex families."
     )
 
     decision_path.append(

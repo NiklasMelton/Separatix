@@ -33,7 +33,8 @@ def format_evidence_table(report: DiagnosticReport) -> str:
     ]
     rendered = ["family | probe | score | se"]
     rendered.extend(" | ".join(row) for row in rows)
-    rendered.append(f"selected={evidence['selected_family']}")
+    rendered.append(f"raw_best={evidence['raw_best_family']}")
+    rendered.append(f"recommended={evidence['recommended_family']}")
     rendered.append(f"recommendation={report.recommendation}")
     return "\n".join(rendered)
 
