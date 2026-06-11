@@ -123,9 +123,7 @@ def compute_scores(
     overlap = _clip(
         np.mean(
             [
-                metrics["neighborhood"].get(
-                    "mean_local_entropy", MIN_NORMALIZED_SCORE
-                ),
+                metrics["neighborhood"].get("mean_local_entropy", MIN_NORMALIZED_SCORE),
                 metrics["neighborhood"].get(
                     "high_entropy_fraction", MIN_NORMALIZED_SCORE
                 ),
@@ -160,9 +158,7 @@ def compute_scores(
         topology = _clip(
             min(
                 MAX_NORMALIZED_SCORE,
-                metrics["topology"].get(
-                    "max_h1_persistence", MIN_NORMALIZED_SCORE
-                ),
+                metrics["topology"].get("max_h1_persistence", MIN_NORMALIZED_SCORE),
             )
         )
     min_class_count = min(metrics["audit"]["class_counts"].values())
