@@ -65,9 +65,9 @@ def _linear(seed: int) -> tuple[np.ndarray, np.ndarray]:
 def _smooth(seed: int) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
     X = rng.uniform(-2.5, 2.5, size=(360, 2))
-    signal = X[:, 1] - 0.50 * (X[:, 0] ** 2) + 0.08 * X[:, 0]
+    signal = X[:, 1] - 0.65 * (X[:, 0] ** 2) + 0.08 * X[:, 0]
     y = (signal + 0.08 * rng.normal(size=X.shape[0]) > 0.0).astype(int)
-    return _pad_noise(X, 6, seed=seed + 100), y
+    return X, y
 
 
 def _local_kernel(seed: int) -> tuple[np.ndarray, np.ndarray]:
