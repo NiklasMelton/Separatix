@@ -6,6 +6,23 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
+_TERSE_PRUNED_KEYS = frozenset(
+    {"candidate_indices", "local_ambiguity", "local_entropy", "predictions"}
+)
+
+
+def _prune_verbose_items(value: Any) -> Any:
+    """Recursively remove verbose fields from a serialized report payload."""
+    if isinstance(value, dict):
+        return {
+            key: _prune_verbose_items(item)
+            for key, item in value.items()
+            if key not in _TERSE_PRUNED_KEYS
+        }
+    if isinstance(value, list):
+        return [_prune_verbose_items(item) for item in value]
+    return value
+
 
 @dataclass
 class DiagnosticReport:
@@ -28,10 +45,11 @@ class DiagnosticReport:
     runtime: dict[str, Any]
     config: dict[str, Any]
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, terse: bool = True) -> dict[str, Any]:
         """Return a JSON-serializable dictionary representation."""
-        return asdict(self)
+        payload = asdict(self)
+        return _prune_verbose_items(payload) if terse else payload
 
-    def to_json(self, *, indent: int = 2) -> str:
+    def to_json(self, *, indent: int = 2, terse: bool = True) -> str:
         """Return a JSON string representation of the report."""
-        return json.dumps(self.to_dict(), indent=indent, sort_keys=True)
+        return json.dumps(self.to_dict(terse=terse), indent=indent, sort_keys=True)
