@@ -13,6 +13,47 @@ def test_report_serialization() -> None:
     assert isinstance(report.to_json(), str)
 
 
+def test_report_serialization_is_terse_by_default() -> None:
+    X, y = make_blobs(n_samples=120, centers=3, random_state=0)
+    report = diagnose(X, y, return_report=True, random_state=0)
+
+    terse = report.to_dict()
+    full = report.to_dict(terse=False)
+
+    neighborhood_terse = terse["metrics"]["neighborhood"]
+    neighborhood_full = full["metrics"]["neighborhood"]
+    boundary_terse = terse["metrics"]["boundary"]
+    boundary_full = full["metrics"]["boundary"]
+    linear_terse = terse["metrics"]["probes"]["linear"]
+    linear_full = full["metrics"]["probes"]["linear"]
+
+    assert "local_entropy" not in neighborhood_terse
+    assert "local_ambiguity" not in neighborhood_terse
+    assert "candidate_indices" not in boundary_terse
+    assert "predictions" not in linear_terse
+    assert "local_entropy" in neighborhood_full
+    assert "local_ambiguity" in neighborhood_full
+    assert "candidate_indices" in boundary_full
+    assert "predictions" in linear_full
+
+
+def test_report_json_full_mode_preserves_verbose_fields() -> None:
+    X, y = make_blobs(n_samples=120, centers=3, random_state=0)
+    report = diagnose(X, y, return_report=True, random_state=0)
+
+    terse_json = report.to_json()
+    full_json = report.to_json(terse=False)
+
+    assert '"local_entropy"' not in terse_json
+    assert '"local_ambiguity"' not in terse_json
+    assert '"candidate_indices"' not in terse_json
+    assert '"predictions"' not in terse_json
+    assert '"local_entropy"' in full_json
+    assert '"local_ambiguity"' in full_json
+    assert '"candidate_indices"' in full_json
+    assert '"predictions"' in full_json
+
+
 def test_skipped_diagnostics_appear() -> None:
     X, y = make_blobs(n_samples=120, centers=2, random_state=0)
     report = diagnose(X, y, return_report=True, topology="persistent", random_state=0)
