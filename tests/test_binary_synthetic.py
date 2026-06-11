@@ -75,5 +75,4 @@ def test_random_labels_are_bottleneck_or_inconclusive() -> None:
     assert report.recommendation in {
         FEATURE_OR_LABEL_BOTTLENECK_LIKELY,
         "inconclusive",
-        "linear_likely_sufficient",
     }

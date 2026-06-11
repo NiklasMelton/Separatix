@@ -28,18 +28,20 @@ The current implementation follows this sequence:
    - boundary candidate diagnostics
    - graph fragmentation diagnostics
    - optional topology diagnostics
-4. Convert the raw diagnostic outputs into a smaller set of normalized summary
-   scores.
-5. Apply explicit rule-based branching to produce:
+4. Build probe-family evidence and uncertainty estimates from the probe-model
+   results.
+5. Convert the raw diagnostic outputs into a smaller set of normalized summary
+   scores for reporting.
+6. Apply an uncertainty-aware recommendation policy to produce:
    - a recommendation category
    - a confidence level
    - a visible decision path
-6. Return either a plain-text recommendation or a structured
+7. Return either a plain-text recommendation or a structured
    `DiagnosticReport`.
 
 The profiler implementation that wires these stages together lives in
 [separatix/profiler.py](/Users/niklasmelton/code/Separatix/separatix/profiler.py),
-and the final score aggregation and branching logic lives in
+and the final score aggregation and recommendation logic lives in
 [separatix/recommendation/engine.py](/Users/niklasmelton/code/Separatix/separatix/recommendation/engine.py).
 
 ## Diagnostic Families
@@ -72,10 +74,10 @@ instead of materializing every pairwise interaction.
 The probe family is not treated as a model-selection tournament. Instead, probe
 performance is used as evidence about the shape of the class boundary:
 
-- If the linear probe is close to the best observed probe, that supports a
-  linear recommendation.
-- If nonlinear probes improve materially over the linear probe, that supports a
-  nonlinear recommendation.
+- If the linear probe is close to the strongest observed family, that supports
+  a linear recommendation.
+- If nonlinear probes clearly improve over linear, that supports a nonlinear
+  recommendation.
 - If all probes are only slightly better than the dummy baseline, that suggests
   weak usable signal or a feature/label bottleneck.
 
@@ -96,8 +98,9 @@ space.
 Boundary-related computations identify candidate points near class transitions,
 then estimate whether the boundary appears relatively smooth or more fragmented.
 
-High fragmentation pushes the recommendation away from smooth global models and
-toward more partitioning-oriented or higher-capacity model families.
+High fragmentation does not directly force a recommendation on its own. Instead,
+it acts as supporting evidence when the probe-model comparisons already suggest
+that smoother global structure may not be enough.
 
 ### Optional Topology Diagnostics
 
@@ -105,10 +108,50 @@ Topology is optional and intentionally not the first-class driver of the
 package. When topology is available, it acts as supporting evidence for
 nontrivial local structure rather than as the primary decision source.
 
+## Probe-Family Evidence
+
+The recommendation decision is anchored in probe-family evidence rather than in
+raw score thresholds alone.
+
+For each available probe, `separatix` records:
+
+- balanced accuracy
+- a per-probe uncertainty estimate
+- repeated-fit stability when available
+- the family that probe belongs to
+
+Probe uncertainty combines:
+
+- a class-aware balanced-accuracy variance estimate
+- repeated holdout stability when the budget includes repeated fits
+
+The report then aggregates probes into three predictive families:
+
+- `linear`
+- `smooth_nonlinear`
+- `local_kernel`
+
+For each family, the report records:
+
+- the best probe within that family
+- the observed family score
+- a family-level uncertainty estimate
+
+The report also distinguishes between:
+
+- `raw_best_family`: the family with the highest observed probe score
+- `recommended_family`: the family actually recommended after conservative
+  escalation
+
+This distinction matters because `separatix` is intentionally biased toward
+simpler explanations unless a more complex family has a clear,
+uncertainty-adjusted advantage.
+
 ## Normalized Summary Scores
 
-The recommendation engine compresses the raw diagnostics into a small set of
-scores in the `[0, 1]` range when possible.
+The recommendation engine still compresses raw diagnostics into a small set of
+scores in the `[0, 1]` range when possible. These scores are mainly descriptive
+report summaries rather than the sole driver of the final recommendation.
 
 ### Signal Score
 
@@ -131,7 +174,7 @@ Interpretation:
 
 ### Linearity Score
 
-`linearity_score` compares the linear probe to the best available probe.
+`linearity_score` compares the linear probe to the strongest observed family.
 
 Interpretation:
 
@@ -141,7 +184,7 @@ Interpretation:
 
 ### Nonlinearity Score
 
-`nonlinearity_score` measures how much the best nonlinear probe improves over
+`nonlinearity_score` measures how much the best nonlinear family improves over
 the linear probe, normalized by the linear probe's remaining headroom.
 
 Interpretation:
@@ -174,102 +217,120 @@ Interpretation:
 `reliability_score` is a confidence support score for the diagnostic process
 itself rather than a measure of class separability alone.
 
-It starts from a high-trust default and is reduced when the run shows signs
-that geometric conclusions may be unstable, incomplete, or underpowered. The
-current implementation subtracts reliability for conditions such as:
+It is derived from evidence-quality flags rather than from a single threshold
+ladder. The current implementation reduces reliability when the run shows signs
+that the diagnostic evidence may be unstable, incomplete, or underpowered, for
+example:
 
 - many skipped diagnostics
 - many warnings
-- extreme distance concentration
-- very small classes
-- severe class imbalance
-- too few boundary samples
-- unstable linear-probe estimates
-- missing core probe results
+- weak signal relative to the dummy baseline
+- resubstitution fallback instead of stratified validation
+- unavailable geometry diagnostics
+- borderline family differences where a more complex family is numerically best
+  but not clearly better
 
 This score is important because `separatix` prefers to say "the geometry is not
 reliable enough to trust" rather than overstate a model recommendation.
 
-## Recommendation Branches
+## Recommendation Policy
 
-The final recommendation is produced by explicit rules, in order. This ordering
-matters.
+The final recommendation is not a simple threshold cascade over the summary
+scores. Instead, it follows a conservative escalation policy:
+
+1. Decide whether there is usable label signal at all.
+2. If there is signal, compare probe families from simpler to more complex.
+3. Escalate to a more complex family only when the evidence clearly supports
+   that move.
 
 ### 1. Reliability Gate
 
-If reliability is too low, the result is:
+If essential evidence is missing or the diagnostic run is too incomplete to
+support a family recommendation, the result is:
 
 - `insufficient_data_or_unreliable_geometry`
 
 Reasoning:
 
-- the package avoids geometry-heavy conclusions when the diagnostics themselves
-  do not look trustworthy enough
+- the package avoids geometry-heavy conclusions when the diagnostic process
+  itself does not look trustworthy enough
 
 ### 2. Weak-Signal Gate
 
-If reliability is acceptable but the overall signal score is very low, the
-result is:
+Before choosing any model family, `separatix` checks whether the strongest
+observed probe clears a 95% normal-approximation signal check against the
+dummy baseline.
 
-- `feature_or_label_bottleneck_likely`
+If that signal test fails, the result is:
+
+- `feature_or_label_bottleneck_likely` when the neighborhoods already look as
+  mixed as a label-shuffled baseline would suggest
+- `inconclusive` otherwise
 
 Reasoning:
 
-- if even the best simple probe barely improves over the dummy baseline, the
-  limiting factor may be the features, the labels, or irreducible overlap
+- if even the best probe does not clearly beat the class-prior baseline, the
+  package should not claim that any model family is strongly indicated
 
-### 3. Linear Sufficiency Branch
+### 3. Conservative Family Escalation
 
-If the linearity score is very high and the nonlinearity score stays small, the
-result is:
+If signal is present, `separatix` compares probe families in complexity order:
+
+- `linear`
+- `smooth_nonlinear`
+- `local_kernel`
+
+#### Linear Recommendation
+
+If the linear family is statistically close enough to the strongest observed
+family, the result is:
 
 - `linear_likely_sufficient`
 
 Reasoning:
 
-- the linear probe already matches the best observed probe closely, so more
-  complex model families may add little
+- the package prefers not to escalate complexity when a simpler linear view is
+  already competitive
 
-### 4. High-Overlap Bottleneck Branch
+#### Smooth Nonlinear Recommendation
 
-If overlap is high but nonlinear gain remains limited, the result is:
-
-- `feature_or_label_bottleneck_likely`
-
-Reasoning:
-
-- local class mixing is already high, but the observed nonlinear probes do not
-  appear to rescue the problem much
-
-### 5. Nonlinear Branch
-
-If nonlinear gain is clearly present, `separatix` looks for what kind of
-nonlinearity seems most plausible.
-
-If fragmentation is high:
-
-- `high_capacity_or_partitioning_recommended`
-
-If topology suggests nontrivial local structure:
-
-- `kernel_or_local_recommended`
-
-If the best probe among the nonlinear probes is a local or kernel-style probe:
-
-- `kernel_or_local_recommended`
-
-Otherwise:
+If linear is no longer sufficient, the default nonlinear recommendation is:
 
 - `smooth_nonlinear_recommended`
 
 Reasoning:
 
-- not all nonlinearity points to the same modeling family
-- smoother gains suggest smooth nonlinear models
-- stronger local structure or fragmented boundaries suggest more local,
-  kernel-like, or partitioning-oriented approaches
+- smooth nonlinear structure is the default next step once linear evidence is
+  no longer enough
+- a small numeric lead from a local/kernel probe is not treated as decisive on
+  its own
+- this is one of the main situations where `raw_best_family` and
+  `recommended_family` may differ
 
-### 6. Mixed-Evidence Fallback
+#### Local Or Kernel Recommendation
+
+`kernel_or_local_recommended` is reserved for cases where the local/kernel
+family clearly beats the smooth nonlinear family after uncertainty adjustment.
+
+Reasoning:
+
+- this reduces brittleness from noisy probe-level wins, especially when one
+  local/kernel probe edges out smooth by only a small amount
+
+### 4. High-Capacity Or Partitioning Upgrade
+
+If the local/kernel family clearly wins and the boundary evidence also suggests
+fragmented structure, the result can be upgraded to:
+
+- `high_capacity_or_partitioning_recommended`
+
+Reasoning:
+
+- not all local structure implies highly partitioned boundaries
+- fragmentation and topology act as supporting evidence here rather than as a
+  shortcut around probe uncertainty
+
+### 5. Mixed-Evidence Fallback
 
 If none of the above branches dominate, the result is:
 
@@ -281,11 +342,11 @@ Reasoning:
 
 ## Confidence Level
 
-The user-facing confidence label is derived from reliability and signal:
+The user-facing confidence label is derived from evidence quality:
 
-- `high` when reliability is high and signal is reasonably strong
-- `medium` when reliability is moderate
-- `low` otherwise
+- `high` when the signal gate clears and no cautionary evidence flags dominate
+- `medium` when a recommendation is still made but cautionary flags are present
+- `low` when the result is inconclusive or the diagnostics are too unreliable
 
 This confidence label is deliberately coarse. It communicates how much trust to
 place in the recommendation, not how likely a future classifier is to achieve a
@@ -301,9 +362,11 @@ The logic reflects a few design choices:
 - Weak-signal and low-reliability states deserve their own outcomes.
 - The output should suggest a rough model-family direction, not a single
   algorithm prescription.
+- More complex families should need clear evidence, not just a tiny raw-score
+  edge.
 
-This is why the implementation uses a visible score-and-rule pipeline instead
-of a hidden meta-model trained to predict the "best classifier."
+This is why the implementation uses a visible evidence-and-escalation pipeline
+instead of a hidden meta-model trained to predict the "best classifier."
 
 ## Relation To Prior Work
 

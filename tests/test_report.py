@@ -13,6 +13,20 @@ def test_report_serialization() -> None:
     assert isinstance(report.to_json(), str)
 
 
+def test_report_serializes_recommendation_evidence() -> None:
+    X, y = make_blobs(n_samples=120, centers=3, random_state=0)
+    report = diagnose(X, y, return_report=True, random_state=0)
+    evidence = report.to_dict()["metrics"]["recommendation_evidence"]
+    assert evidence["selection_rule"]
+    assert evidence["probe_table"]
+    assert "raw_best_family" in evidence
+    assert "recommended_family" in evidence
+    assert "linear" in evidence["families"]
+    assert "quality_flags" in evidence
+    assert "graph_fragmentation_bootstrap_repeats" in evidence["geometry"]
+    assert "recommendation_evidence" in report.interpretations
+
+
 def test_report_serialization_is_terse_by_default() -> None:
     X, y = make_blobs(n_samples=120, centers=3, random_state=0)
     report = diagnose(X, y, return_report=True, random_state=0)
