@@ -89,6 +89,15 @@ The report is JSON-serializable through `report.to_dict()` and `report.to_json()
 These categories are intentionally coarse. They describe the apparent geometry
 and difficulty of the labeled feature space, not a guaranteed best model choice.
 
+The synthetic recommendation ladder below shows how `separatix` responds as the
+designed dataset geometry moves from simple linear structure toward smoother
+nonlinearity, local or kernel-like structure, fragmented boundaries, and
+finally weak-signal or random-label bottlenecks. The x-axis is the intended
+dataset complexity, while the y-axis is the coarse recommendation level
+reported by `separatix`.
+
+![separatix recommendation complexity ladder](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_recommendation_complexity_ladder.png)
+
 ## Decision Pipeline
 
 The recommendation is produced by a fixed, inspectable pipeline:
@@ -123,6 +132,7 @@ recorded in the report.
 - [examples/high_dimensional_curvilinear_hyperplane.py](/Users/niklasmelton/code/Separatix/examples/high_dimensional_curvilinear_hyperplane.py)
 - [examples/moons_vs_linear.py](/Users/niklasmelton/code/Separatix/examples/moons_vs_linear.py)
 - [examples/circles_kernel_signal.py](/Users/niklasmelton/code/Separatix/examples/circles_kernel_signal.py)
+- [examples/recommendation_complexity_ladder.py](/Users/niklasmelton/code/Separatix/examples/recommendation_complexity_ladder.py)
 - [examples/multiclass_wine.py](/Users/niklasmelton/code/Separatix/examples/multiclass_wine.py)
 - [examples/sparse_text_like_embeddings.py](/Users/niklasmelton/code/Separatix/examples/sparse_text_like_embeddings.py)
 
