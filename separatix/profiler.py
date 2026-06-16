@@ -27,6 +27,8 @@ class ComplexityProfiler:
     def __init__(
         self,
         *,
+        target_mode: Literal["auto", "singlelabel", "multilabel"] = "auto",
+        multilabel_stratification: Literal["auto", "iterative", "heuristic"] = "auto",
         budget: Literal["fast", "standard", "extended"] = "standard",
         topology: Literal["off", "auto", "graph", "persistent"] = "auto",
         densify_policy: Literal["fail", "warn_and_sample", "skip"] = (
@@ -41,6 +43,8 @@ class ComplexityProfiler:
     ) -> None:
         """Initialize the profiler with validated configuration."""
         self.config = ProfilerConfig(
+            target_mode=target_mode,
+            multilabel_stratification=multilabel_stratification,
             budget=budget,
             topology=topology,
             densify_policy=densify_policy,
@@ -55,6 +59,17 @@ class ComplexityProfiler:
 
     def fit(self, X: Any, y: Any) -> ComplexityProfiler:
         """Run diagnostics and store the resulting report in report_."""
+        if self.config.target_mode == "multilabel":
+            return self._fit_multilabel(X, y)
+        if self.config.target_mode == "auto":
+            from separatix.multilabel.validation import is_multilabel_indicator
+
+            if is_multilabel_indicator(y, allow_single_column=False):
+                return self._fit_multilabel(X, y)
+        return self._fit_singlelabel(X, y)
+
+    def _fit_singlelabel(self, X: Any, y: Any) -> ComplexityProfiler:
+        """Run single-label diagnostics and store the resulting report."""
         start = time.perf_counter()
         validated = validate_inputs(X, y)
         report_context: dict[str, Any] = {
@@ -158,6 +173,13 @@ class ComplexityProfiler:
         )
         report.recommendation_text = render_recommendation(report)
         self.report_ = report
+        return self
+
+    def _fit_multilabel(self, X: Any, y: Any) -> ComplexityProfiler:
+        """Run multilabel diagnostics and store the resulting report."""
+        from separatix.multilabel.pipeline import fit_multilabel
+
+        self.report_ = fit_multilabel(X, y, config=self.config)
         return self
 
     def report(self) -> DiagnosticReport:
