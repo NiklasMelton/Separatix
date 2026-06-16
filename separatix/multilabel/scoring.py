@@ -97,12 +97,12 @@ def _per_label_metrics(
     for idx in range(Y_true.shape[1]):
         true_col = Y_true[:, idx]
         pred_col = Y_pred[:, idx]
-        precision = float(
-            precision_score(true_col, pred_col, zero_division=0)
-        )
+        precision = float(precision_score(true_col, pred_col, zero_division=0))
         recall = float(recall_score(true_col, pred_col, zero_division=0))
-        f1 = 0.0 if precision + recall == 0.0 else (
-            2.0 * precision * recall / (precision + recall)
+        f1 = (
+            0.0
+            if precision + recall == 0.0
+            else (2.0 * precision * recall / (precision + recall))
         )
         if np.unique(true_col).shape[0] < 2:
             balanced = None
@@ -268,10 +268,6 @@ def summarize_multilabel_stability(
         "stability_method": method,
     }
     for metric, values in scores.items():
-        result[f"stability_{metric}_mean"] = (
-            float(np.mean(values)) if values else None
-        )
-        result[f"stability_{metric}_std"] = (
-            float(np.std(values)) if values else None
-        )
+        result[f"stability_{metric}_mean"] = float(np.mean(values)) if values else None
+        result[f"stability_{metric}_std"] = float(np.std(values)) if values else None
     return result
