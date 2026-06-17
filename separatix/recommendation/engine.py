@@ -1101,6 +1101,14 @@ def _multilabel_quality_flags(
                 "message": "Warnings were recorded while computing diagnostics.",
             }
         )
+    if metrics.get("graph", {}).get("warning") is not None:
+        flags.append(
+            {
+                "name": "boundary_graph_limited",
+                "severity": "info",
+                "message": metrics["graph"]["warning"],
+            }
+        )
     return flags
 
 
@@ -1210,6 +1218,9 @@ def compute_multilabel_scores(
         "neighborhood_coherence_score": metrics.get("neighborhood", {}).get(
             "mean_neighbor_jaccard"
         ),
+        "fragmentation_score": _numeric(
+            metrics.get("graph", {}).get("graph_fragmentation_score")
+        ),
         "reliability_score": evidence["quality_score"],
     }
 
@@ -1252,6 +1263,12 @@ def make_multilabel_recommendation(
         )
         smooth_clear = len(comparisons["smooth_vs_linear"]["clear_metrics"])
         local_clear = len(comparisons["local_kernel_vs_smooth"]["clear_metrics"])
+        graph = metrics.get("graph", {})
+        multilabel_fragmentation_supported = bool(
+            graph.get("graph_fragmentation_score") is not None
+            and float(graph["graph_fragmentation_score"]) >= 0.5
+            and int(metrics.get("boundary", {}).get("boundary_sample_size", 0)) >= 10
+        )
         if linear_within >= 2 and linear_worse == 0:
             recommendation = LINEAR_LIKELY_SUFFICIENT
             decision_path.append(
@@ -1265,11 +1282,19 @@ def make_multilabel_recommendation(
                 "least two primary multilabel metrics."
             )
         elif local_clear >= 2:
-            recommendation = KERNEL_OR_LOCAL_RECOMMENDED
-            decision_path.append(
-                "Local or kernel-style probes clearly improved over smooth "
-                "nonlinear probes on at least two primary multilabel metrics."
-            )
+            if multilabel_fragmentation_supported:
+                recommendation = HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
+                decision_path.append(
+                    "Local or kernel-style probes clearly improved over smooth "
+                    "nonlinear probes, and multilabel boundary candidates formed a "
+                    "fragmented graph."
+                )
+            else:
+                recommendation = KERNEL_OR_LOCAL_RECOMMENDED
+                decision_path.append(
+                    "Local or kernel-style probes clearly improved over smooth "
+                    "nonlinear probes on at least two primary multilabel metrics."
+                )
         else:
             recommendation = INCONCLUSIVE
             decision_path.append(
@@ -1296,6 +1321,10 @@ def make_multilabel_recommendation(
         "signal": "Higher values mean labels appear predictable beyond prevalence.",
         "linearity": "Higher values mean linear probes are close to the best family.",
         "neighborhood": "Higher values mean nearby samples share label sets.",
+        "fragmentation": (
+            "Higher values mean multilabel boundary candidates form a more "
+            "fragmented local graph."
+        ),
         "reliability": (
             "Higher values mean essential multilabel evidence was available."
         ),

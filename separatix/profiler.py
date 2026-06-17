@@ -11,9 +11,15 @@ from scipy import sparse
 from separatix.config import ProfilerConfig
 from separatix.metrics.audit import compute_dataset_audit, compute_multilabel_audit
 from separatix.metrics.baseline import summarize_probe_family
-from separatix.metrics.boundary import compute_boundary_candidates
+from separatix.metrics.boundary import (
+    compute_boundary_candidates,
+    compute_multilabel_boundary_candidates,
+)
 from separatix.metrics.geometry import compute_geometry_diagnostics
-from separatix.metrics.graph import compute_graph_fragmentation
+from separatix.metrics.graph import (
+    compute_graph_fragmentation,
+    compute_multilabel_graph_fragmentation,
+)
 from separatix.metrics.neighborhood import (
     compute_multilabel_neighborhood_diagnostics,
     compute_neighborhood_diagnostics,
@@ -234,23 +240,25 @@ class ComplexityProfiler:
             config=self.config,
             report_context=report_context,
         )
+        boundary = compute_multilabel_boundary_candidates(
+            Y_usable,
+            neighborhood,
+            probes,
+            label_names=label_names,
+        )
+        graph = compute_multilabel_graph_fragmentation(
+            validated.X,
+            Y_usable,
+            boundary,
+            config=self.config,
+        )
         metrics = {
             "audit": audit,
             "probes": probes,
             "baseline": self._multilabel_baseline_summary(probes),
             "neighborhood": neighborhood,
-            "boundary": {
-                "skipped_reason": (
-                    "multilabel boundary diagnostics require label-set disagreement "
-                    "semantics and are not implemented in this phase"
-                )
-            },
-            "graph": {
-                "skipped_reason": (
-                    "multilabel graph fragmentation is not implemented until "
-                    "multilabel boundary candidates are available"
-                )
-            },
+            "boundary": boundary,
+            "graph": graph,
             "topology": {
                 "skipped_reason": (
                     "topology is skipped for the initial multilabel diagnostic path"
@@ -259,14 +267,6 @@ class ComplexityProfiler:
         }
         report_context["skipped_diagnostics"].extend(
             [
-                {
-                    "name": "multilabel_boundary",
-                    "reason": metrics["boundary"]["skipped_reason"],
-                },
-                {
-                    "name": "multilabel_graph",
-                    "reason": metrics["graph"]["skipped_reason"],
-                },
                 {
                     "name": "multilabel_topology",
                     "reason": metrics["topology"]["skipped_reason"],
@@ -310,7 +310,7 @@ class ComplexityProfiler:
             sampling={
                 "probe": probes["linear"].get("sample_info"),
                 "neighbors": neighborhood.get("sampling"),
-                "boundary": None,
+                "boundary": graph.get("sampling"),
             },
             densification_events=report_context["densification_events"],
             class_summary=class_summary,

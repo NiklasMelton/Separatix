@@ -23,6 +23,8 @@ def test_diagnose_auto_multilabel_returns_report() -> None:
     assert isinstance(report, DiagnosticReport)
     assert report.class_summary["target_type"] == "multilabel"
     assert "multilabel_recommendation_evidence" in report.metrics
+    assert "candidate_indices" in report.metrics["boundary"]
+    assert "mean_edge_label_jaccard" in report.metrics["graph"]
 
 
 def test_diagnose_multilabel_returns_text_by_default() -> None:
@@ -47,8 +49,10 @@ def test_multilabel_report_serializes_and_prunes_verbose_fields() -> None:
     assert "per_label_metrics" not in terse["metrics"]["probes"]["linear"]
     assert "predictions" not in terse["metrics"]["probes"]["linear"]
     assert "local_label_entropy" not in terse["metrics"]["neighborhood"]
+    assert "trigger_names_by_index" not in terse["metrics"]["boundary"]
     assert "per_label_metrics" in full["metrics"]["probes"]["linear"]
     assert "predictions" in full["metrics"]["probes"]["linear"]
+    assert "trigger_names_by_index" in full["metrics"]["boundary"]
     assert report.to_json()
 
 

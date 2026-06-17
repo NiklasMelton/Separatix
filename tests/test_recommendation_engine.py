@@ -1,4 +1,10 @@
-from separatix.recommendation.engine import compute_scores, make_recommendation
+from separatix.constants import HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
+from separatix.recommendation.engine import (
+    compute_multilabel_scores,
+    compute_scores,
+    make_multilabel_recommendation,
+    make_recommendation,
+)
 
 
 def test_recommendation_engine_linear_branch() -> None:
@@ -211,3 +217,45 @@ def test_recommendation_engine_keeps_linear_within_one_standard_error() -> None:
         "conservative escalation"
         in metrics["recommendation_evidence"]["selection_rule"]
     )
+
+
+def test_multilabel_recommendation_engine_uses_fragmentation_for_high_capacity(
+) -> None:
+    metrics = {
+        "probes": {
+            "dummy": {
+                "micro_f1": 0.30,
+                "macro_f1": 0.25,
+                "sample_jaccard": 0.20,
+            },
+            "linear": {
+                "micro_f1": 0.55,
+                "macro_f1": 0.48,
+                "sample_jaccard": 0.42,
+            },
+            "smooth_poly": {
+                "micro_f1": 0.62,
+                "macro_f1": 0.58,
+                "sample_jaccard": 0.50,
+            },
+            "knn": {
+                "micro_f1": 0.82,
+                "macro_f1": 0.60,
+                "sample_jaccard": 0.76,
+            },
+            "kernel_approx": {
+                "micro_f1": 0.78,
+                "macro_f1": 0.57,
+                "sample_jaccard": 0.72,
+            },
+        },
+        "neighborhood": {"mean_neighbor_jaccard": 0.45},
+        "graph": {"graph_fragmentation_score": 0.62},
+        "boundary": {"boundary_sample_size": 18},
+        "audit": {"n_samples": 120, "usable_label_count": 4},
+    }
+    scores = compute_multilabel_scores(metrics, skipped_count=0, warning_count=0)
+    recommendation, _, path, _ = make_multilabel_recommendation(scores, metrics)
+
+    assert recommendation == HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
+    assert any("fragmented graph" in step for step in path)

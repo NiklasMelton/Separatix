@@ -176,6 +176,8 @@ def compute_multilabel_neighborhood_diagnostics(
     hamming_values: list[float] = []
     local_entropies: list[float] = []
     cardinality_stds: list[float] = []
+    local_jaccard_means: list[float] = []
+    local_hamming_means: list[float] = []
     empty_union_count = 0
     pair_count = 0
     for row_i, neighbors in enumerate(indices):
@@ -193,6 +195,9 @@ def compute_multilabel_neighborhood_diagnostics(
             else:
                 jaccards.append(float(np.sum(intersection) / np.sum(union)))
             hamming_values.append(float(np.mean(row != neighbor)))
+        start = pair_count - len(neighbor_labels)
+        local_jaccard_means.append(float(np.mean(jaccards[start:pair_count])))
+        local_hamming_means.append(float(np.mean(hamming_values[start:pair_count])))
 
     local_entropy_array = np.asarray(local_entropies, dtype=float)
     jaccard_array = np.asarray(jaccards, dtype=float)
@@ -207,6 +212,9 @@ def compute_multilabel_neighborhood_diagnostics(
             empty_union_count / max(1, pair_count)
         ),
         "empty_union_jaccard_convention": "empty unions are scored as 0.0",
+        "local_neighbor_jaccard": local_jaccard_means,
+        "local_neighbor_hamming_distance": local_hamming_means,
         "local_label_entropy": local_entropies,
+        "local_cardinality_std": cardinality_stds,
         "sampling": sample_info,
     }
