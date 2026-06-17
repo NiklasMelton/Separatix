@@ -54,10 +54,11 @@ print(report.to_json())
 - SciPy sparse matrices
 - pandas DataFrames and Series when pandas is installed
 - Binary and multiclass classification targets
+- Multilabel binary indicator targets with `target_mode="multilabel"` or
+  auto-detection for unambiguous 2D indicators
 - String or numeric labels treated as categorical class identifiers
 
-Regression, multilabel classification, and multioutput classification are not
-supported.
+Regression and multioutput classification are not supported.
 
 ## What It Returns
 
@@ -76,6 +77,15 @@ By default, `diagnose(...)` returns a plain-text recommendation. With
 - preprocessing and runtime metadata
 
 The report is JSON-serializable through `report.to_dict()` and `report.to_json()`.
+
+For multilabel targets, `separatix` compares probe families across micro F1,
+macro F1, and sample Jaccard rather than collapsing the evidence into a single
+weighted score. Optional iterative multilabel stratification can be installed
+with:
+
+```bash
+pip install "separatix[multilabel]"
+```
 
 ## Recommendation Categories
 
@@ -139,6 +149,7 @@ recorded in the report.
 - [examples/circles_kernel_signal.py](/Users/niklasmelton/code/Separatix/examples/circles_kernel_signal.py)
 - [examples/recommendation_complexity_ladder.py](/Users/niklasmelton/code/Separatix/examples/recommendation_complexity_ladder.py)
 - [examples/multiclass_wine.py](/Users/niklasmelton/code/Separatix/examples/multiclass_wine.py)
+- [examples/openml_multilabel_yeast.py](/Users/niklasmelton/code/Separatix/examples/openml_multilabel_yeast.py)
 - [examples/sparse_text_like_embeddings.py](/Users/niklasmelton/code/Separatix/examples/sparse_text_like_embeddings.py)
 
 ## Related Work

@@ -7,7 +7,14 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 _TERSE_PRUNED_KEYS = frozenset(
-    {"candidate_indices", "local_ambiguity", "local_entropy", "predictions"}
+    {
+        "candidate_indices",
+        "local_ambiguity",
+        "local_entropy",
+        "local_label_entropy",
+        "per_label_metrics",
+        "predictions",
+    }
 )
 
 
