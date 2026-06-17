@@ -6,7 +6,12 @@ from typing import Any, TypedDict, cast
 
 import numpy as np
 from scipy import sparse
-from sklearn.model_selection import KFold, ShuffleSplit
+from sklearn.model_selection import (
+    KFold,
+    ShuffleSplit,
+    StratifiedKFold,
+    StratifiedShuffleSplit,
+)
 
 from separatix.config import ProfilerConfig
 from separatix.constants import BUDGETS
@@ -195,6 +200,11 @@ def _heuristic_multilabel_indices(
     return np.asarray(sorted(chosen), dtype=int)
 
 
+def _is_single_column_multilabel(Y: Any) -> bool:
+    """Return whether a multilabel target is the degenerate one-column case."""
+    return _dense_multilabel_matrix(Y).shape[1] == 1
+
+
 def multilabel_subsample_indices(
     Y: Any,
     *,
@@ -204,6 +214,14 @@ def multilabel_subsample_indices(
     """Return multilabel-aware subsample indices and the method used."""
     if n_samples >= Y.shape[0]:
         return np.arange(Y.shape[0], dtype=int), "none"
+    Y_dense = _dense_multilabel_matrix(Y)
+    if _is_single_column_multilabel(Y_dense):
+        indices = stratified_subsample_indices(
+            Y_dense[:, 0],
+            n_samples=n_samples,
+            random_state=config.random_state,
+        )
+        return indices, "binary_stratified"
     splitters = _require_iterative_multilabel_splitters(config)
     if config.multilabel_stratification != "heuristic" and splitters is not None:
         _, splitter_cls = splitters
@@ -213,9 +231,7 @@ def multilabel_subsample_indices(
                 train_size=n_samples,
                 random_state=config.random_state,
             )
-            train_idx, _ = next(
-                splitter.split(np.zeros((Y.shape[0], 1)), _dense_multilabel_matrix(Y))
-            )
+            train_idx, _ = next(splitter.split(np.zeros((Y.shape[0], 1)), Y_dense))
             return np.asarray(sorted(train_idx), dtype=int), "iterative"
         except (TypeError, ValueError):
             if config.multilabel_stratification == "iterative":
@@ -314,6 +330,16 @@ def choose_multilabel_cv(
     else:
         return None, "resubstitution_low_reliability"
 
+    if _is_single_column_multilabel(Y_dense):
+        return (
+            StratifiedKFold(
+                n_splits=n_splits,
+                shuffle=True,
+                random_state=config.random_state,
+            ),
+            "binary_stratified",
+        )
+
     splitters = _require_iterative_multilabel_splitters(config)
     if config.multilabel_stratification != "heuristic" and splitters is not None:
         splitter_cls, _ = splitters
@@ -340,6 +366,15 @@ def choose_multilabel_holdout(
     """Choose a repeated multilabel holdout splitter."""
     if repeats <= 0:
         return None, "disabled"
+    if _is_single_column_multilabel(Y):
+        return (
+            StratifiedShuffleSplit(
+                n_splits=repeats,
+                test_size=0.25,
+                random_state=config.random_state,
+            ),
+            "binary_stratified",
+        )
     splitters = _require_iterative_multilabel_splitters(config)
     if config.multilabel_stratification != "heuristic" and splitters is not None:
         _, splitter_cls = splitters

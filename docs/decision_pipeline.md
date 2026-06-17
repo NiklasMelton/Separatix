@@ -18,26 +18,31 @@ raw tabular or vectorized features as long as the task is classification.
 The current implementation follows this sequence:
 
 1. Validate `X` and `y`, reject unsupported target structures, and encode class
-   labels.
-2. Record dataset audit information such as class counts, imbalance, sparsity,
-   and number of classes.
-3. Compute diagnostic families:
-   - geometry diagnostics
-   - simple probe-model diagnostics
-   - neighborhood overlap diagnostics
-   - boundary candidate diagnostics
-   - graph fragmentation diagnostics
-   - optional topology diagnostics
-4. Build probe-family evidence and uncertainty estimates from the probe-model
+   labels or multilabel indicators.
+2. Dispatch to either the single-label or multilabel diagnostic path.
+3. Record dataset audit information such as class counts, imbalance, sparsity,
+   number of classes, or multilabel support statistics.
+4. Compute diagnostic families:
+   - single-label: geometry, probe models, neighborhood overlap, boundary
+     candidates, graph fragmentation, optional topology
+   - multilabel: probe models, neighborhood coherence, boundary candidates,
+     graph fragmentation, optional topology
+5. Build probe-family evidence and uncertainty estimates from the probe-model
    results.
-5. Convert the raw diagnostic outputs into a smaller set of normalized summary
+6. Convert the raw diagnostic outputs into a smaller set of normalized summary
    scores for reporting.
-6. Apply an uncertainty-aware recommendation policy to produce:
+7. Apply an uncertainty-aware recommendation policy to produce:
    - a recommendation category
    - a confidence level
    - a visible decision path
-7. Return either a plain-text recommendation or a structured
+8. Return either a plain-text recommendation or a structured
    `DiagnosticReport`.
+
+For single-label targets, the recommendation path is anchored in balanced
+accuracy plus geometry-aware supporting diagnostics. For multilabel targets,
+the recommendation path is anchored in `micro_f1`, `macro_f1`, and
+`sample_jaccard`, without collapsing those primary metrics into a weighted
+aggregate.
 
 The profiler implementation that wires these stages together lives in
 [separatix/profiler.py](/Users/niklasmelton/code/Separatix/separatix/profiler.py),
@@ -49,14 +54,23 @@ and the final score aggregation and recommendation logic lives in
 The recommendation engine does not act on raw coordinates alone. It combines
 several different views of the labeled feature space.
 
+`separatix` now has two related but distinct recommendation paths:
+
+- a single-label path for binary and multiclass classification
+- a multilabel path for binary indicator targets
+
+The public recommendation labels stay the same, but the evidence objects are
+tailored to the target structure.
+
 ### Dataset Audit
 
 The audit step captures dataset conditions that affect trustworthiness:
 
-- number of classes
-- class counts
-- class imbalance ratio
-- small-class edge cases
+- number of classes or labels
+- class counts or label supports
+- class imbalance ratio or label density
+- all-zero multilabel rows
+- small-class or too-rare-label edge cases
 
 These signals are used later when estimating recommendation reliability.
 
@@ -72,23 +86,31 @@ expensive, it can fall back to a low-rank polynomial-kernel approximation
 instead of materializing every pairwise interaction.
 
 The probe family is not treated as a model-selection tournament. Instead, probe
-performance is used as evidence about the shape of the class boundary:
+performance is used as evidence about the shape of the decision surface:
 
 - If the linear probe is close to the strongest observed family, that supports
   a linear recommendation.
 - If nonlinear probes clearly improve over linear, that supports a nonlinear
   recommendation.
-- If all probes are only slightly better than the dummy baseline, that suggests
-  weak usable signal or a feature/label bottleneck.
+- If all probes are only slightly better than the dummy or prevalence
+  baseline, that suggests weak usable signal or a feature/label bottleneck.
 
 ### Neighborhood Diagnostics
 
-Neighborhood metrics estimate how mixed the classes are locally. The current
-summary logic uses signals such as:
+Neighborhood metrics estimate how mixed the labels are locally.
+
+For single-label targets, the current summary logic uses signals such as:
 
 - mean local entropy
 - fraction of high-entropy neighborhoods
 - cross-class neighbor fraction
+
+For multilabel targets, the current summary logic uses signals such as:
+
+- mean neighbor Jaccard similarity
+- mean neighbor Hamming distance
+- local label entropy
+- local label-cardinality variation
 
 High local mixing is interpreted as overlap or ambiguity in the labeled feature
 space.
@@ -97,6 +119,17 @@ space.
 
 Boundary-related computations identify candidate points near class transitions,
 then estimate whether the boundary appears relatively smooth or more fragmented.
+
+For multilabel targets, the current boundary candidates come from several
+transparent triggers rather than from one weighted score. Those triggers
+include:
+
+- low local neighbor Jaccard
+- high local neighbor Hamming distance
+- high local label entropy
+- high local label-cardinality variation
+- disagreement between linear and local probe predictions when those
+  predictions are directly comparable
 
 High fragmentation does not directly force a recommendation on its own. Instead,
 it acts as supporting evidence when the probe-model comparisons already suggest
@@ -108,12 +141,25 @@ Topology is optional and intentionally not the first-class driver of the
 package. When topology is available, it acts as supporting evidence for
 nontrivial local structure rather than as the primary decision source.
 
+For single-label targets, persistent topology is computed over boundary
+candidate subsets when feasible.
+
+For multilabel targets, persistent topology is computed on two capped object
+types when feasible:
+
+- the multilabel boundary-candidate cloud
+- a small capped set of high-support label-positive subsets
+
+This is intentionally narrower than "topology over all observed label sets."
+That broader construction is harder to explain, more expensive, and more
+combinatorial.
+
 ## Probe-Family Evidence
 
 The recommendation decision is anchored in probe-family evidence rather than in
 raw score thresholds alone.
 
-For each available probe, `separatix` records:
+For each available single-label probe, `separatix` records:
 
 - balanced accuracy
 - a per-probe uncertainty estimate
@@ -125,6 +171,15 @@ Probe uncertainty combines:
 - a class-aware balanced-accuracy variance estimate
 - repeated holdout stability when the budget includes repeated fits
 
+For multilabel probes, `separatix` records the corresponding evidence across
+three primary metrics:
+
+- `micro_f1`
+- `macro_f1`
+- `sample_jaccard`
+
+Each metric keeps its own uncertainty estimate. 
+
 The report then aggregates probes into three predictive families:
 
 - `linear`
@@ -134,7 +189,7 @@ The report then aggregates probes into three predictive families:
 For each family, the report records:
 
 - the best probe within that family
-- the observed family score
+- the observed family score or per-metric family evidence
 - a family-level uncertainty estimate
 
 The report also distinguishes between:
@@ -153,6 +208,9 @@ The recommendation engine still compresses raw diagnostics into a small set of
 scores in the `[0, 1]` range when possible. These scores are mainly descriptive
 report summaries rather than the sole driver of the final recommendation.
 
+The exact score names differ slightly between the single-label and multilabel
+paths.
+
 ### Signal Score
 
 `signal_score` measures how far the best available probe rises above the dummy
@@ -163,6 +221,12 @@ Interpretation:
 - higher means the labels appear more predictable than a class-prior baseline
 - lower means the feature space may contain weak usable signal
 
+For multilabel runs, this evidence is reported separately as:
+
+- `signal_micro_f1`
+- `signal_macro_f1`
+- `signal_sample_jaccard`
+
 ### Overlap Score
 
 `overlap_score` averages several neighborhood-mixing statistics.
@@ -171,6 +235,10 @@ Interpretation:
 
 - higher means nearby examples are more class-mixed and ambiguous
 - lower means neighborhoods are more class-consistent
+
+For multilabel runs, the analogous summary score is
+`neighborhood_coherence_score`, which is currently based on mean neighbor
+Jaccard similarity.
 
 ### Linearity Score
 
@@ -182,6 +250,13 @@ Interpretation:
   performance
 - lower means some nonlinearity appears useful
 
+For multilabel runs, this evidence is again split across the three primary
+metrics:
+
+- `linearity_micro_f1`
+- `linearity_macro_f1`
+- `linearity_sample_jaccard`
+
 ### Nonlinearity Score
 
 `nonlinearity_score` measures how much the best nonlinear family improves over
@@ -191,6 +266,10 @@ Interpretation:
 
 - higher means nonlinear structure appears materially useful
 - near zero means nonlinear probes did not add much beyond linear
+
+The multilabel path does not currently report a single `nonlinearity_score`.
+Instead, it keeps the family-comparison logic directly in the
+`multilabel_recommendation_evidence` object.
 
 ### Fragmentation Score
 
@@ -209,7 +288,8 @@ whether there is evidence of nontrivial local structure.
 
 Interpretation:
 
-- higher means topology contributed evidence for more structured local geometry
+- higher means topology contributed supporting evidence for more structured
+  local geometry
 - missing means topology was unavailable or skipped
 
 ### Reliability Score
@@ -258,8 +338,17 @@ Reasoning:
 ### 2. Weak-Signal Gate
 
 Before choosing any model family, `separatix` checks whether the strongest
-observed probe clears a 95% normal-approximation signal check against the
-dummy baseline.
+observed probe clears a signal check against the dummy or prevalence baseline.
+
+For single-label runs, this is a 95% normal-approximation check against the
+dummy balanced-accuracy baseline.
+
+For multilabel runs, this requires the best predictive family to clearly beat
+the dummy or prevalence baseline on at least two of:
+
+- `micro_f1`
+- `macro_f1`
+- `sample_jaccard`
 
 If that signal test fails, the result is:
 
@@ -291,6 +380,9 @@ Reasoning:
 
 - the package prefers not to escalate complexity when a simpler linear view is
   already competitive
+- in the multilabel path, "close enough" means linear is within one standard
+  error of the best family on at least two primary metrics and not clearly
+  worse on the third
 
 #### Smooth Nonlinear Recommendation
 
@@ -306,6 +398,8 @@ Reasoning:
   its own
 - this is one of the main situations where `raw_best_family` and
   `recommended_family` may differ
+- in the multilabel path, the smooth family must clearly improve over linear on
+  at least two primary metrics
 
 #### Local Or Kernel Recommendation
 
@@ -316,6 +410,8 @@ Reasoning:
 
 - this reduces brittleness from noisy probe-level wins, especially when one
   local/kernel probe edges out smooth by only a small amount
+- in the multilabel path, the local/kernel family must clearly beat the smooth
+  family on at least two primary metrics
 
 ### 4. High-Capacity Or Partitioning Upgrade
 
@@ -327,8 +423,10 @@ fragmented structure, the result can be upgraded to:
 Reasoning:
 
 - not all local structure implies highly partitioned boundaries
-- fragmentation and topology act as supporting evidence here rather than as a
-  shortcut around probe uncertainty
+- in the multilabel path, this upgrade currently requires both a clear
+  local/kernel win and sufficiently strong boundary graph fragmentation
+- topology can reinforce the explanation, but it does not replace the
+  fragmentation gate
 
 ### 5. Mixed-Evidence Fallback
 

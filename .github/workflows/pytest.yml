@@ -40,11 +40,13 @@ jobs:
         run: poetry run ruff format --check separatix tests
 
   pytest:
+    name: pytest (${{ matrix.suite-name }}, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        suite-name: ["base", "tda", "multilabel", "tda+multilabel"]
 
     steps:
       - name: Check out repository
@@ -66,8 +68,35 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: poetry
 
+      - name: Select suite configuration
+        id: suite
+        shell: bash
+        run: |
+          case "${{ matrix.suite-name }}" in
+            base)
+              echo "install_args=" >> "$GITHUB_OUTPUT"
+              echo "pytest_command=poetry run pytest" >> "$GITHUB_OUTPUT"
+              ;;
+            tda)
+              echo "install_args=-E tda" >> "$GITHUB_OUTPUT"
+              echo "pytest_command=poetry run pytest tests/test_optional_topology.py tests/test_multilabel_topology.py tests/test_report.py" >> "$GITHUB_OUTPUT"
+              ;;
+            multilabel)
+              echo "install_args=-E multilabel" >> "$GITHUB_OUTPUT"
+              echo "pytest_command=poetry run pytest tests/test_multilabel_api.py tests/test_multilabel_boundary_graph.py tests/test_multilabel_sampling.py tests/test_multilabel_validation.py tests/test_recommendation_engine.py" >> "$GITHUB_OUTPUT"
+              ;;
+            tda+multilabel)
+              echo "install_args=-E tda -E multilabel" >> "$GITHUB_OUTPUT"
+              echo "pytest_command=poetry run pytest tests/test_multilabel_api.py tests/test_multilabel_topology.py tests/test_multilabel_sampling.py tests/test_recommendation_engine.py" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown pytest suite: ${{ matrix.suite-name }}" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Install dependencies
-        run: poetry install --with dev
+        run: poetry install --with dev ${{ steps.suite.outputs.install_args }}
 
       - name: Run pytest
-        run: poetry run pytest
+        run: ${{ steps.suite.outputs.pytest_command }}

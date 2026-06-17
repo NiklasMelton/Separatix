@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from separatix.config import ProfilerConfig
-from separatix.sampling import cap_multilabel_samples_for_budget, choose_multilabel_cv
+from separatix.sampling import (
+    cap_multilabel_samples_for_budget,
+    choose_multilabel_cv,
+    choose_multilabel_holdout,
+)
 
 
 def test_multilabel_heuristic_sampling_is_deterministic() -> None:
@@ -38,6 +42,18 @@ def test_multilabel_cv_gracefully_falls_back_to_heuristic() -> None:
     cv, method = choose_multilabel_cv(Y, max_folds=5, config=config)
     assert cv is not None
     assert method == "heuristic"
+
+
+def test_single_column_multilabel_uses_binary_stratified_splitters() -> None:
+    Y = np.array([[0], [0], [1], [1], [0], [1]])
+    config = ProfilerConfig(multilabel_stratification="auto", random_state=0)
+    cv, cv_method = choose_multilabel_cv(Y, max_folds=5, config=config)
+    holdout, holdout_method = choose_multilabel_holdout(Y, repeats=3, config=config)
+
+    assert cv is not None
+    assert holdout is not None
+    assert cv_method == "binary_stratified"
+    assert holdout_method == "binary_stratified"
 
 
 def test_iterative_mode_requires_optional_dependency_when_absent() -> None:
