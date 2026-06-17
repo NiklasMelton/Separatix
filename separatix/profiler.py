@@ -333,7 +333,7 @@ class ComplexityProfiler:
 
     @staticmethod
     def _multilabel_baseline_summary(
-        probes: dict[str, dict[str, Any]]
+        probes: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         """Return compact best-probe summaries for multilabel primary metrics."""
         primary = ("micro_f1", "macro_f1", "sample_jaccard")

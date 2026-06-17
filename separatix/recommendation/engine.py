@@ -1202,12 +1202,8 @@ def compute_multilabel_scores(
         "signal_sample_jaccard": _score_gap_multilabel(
             family_metrics, "sample_jaccard"
         ),
-        "linearity_micro_f1": _linearity_score_multilabel(
-            family_metrics, "micro_f1"
-        ),
-        "linearity_macro_f1": _linearity_score_multilabel(
-            family_metrics, "macro_f1"
-        ),
+        "linearity_micro_f1": _linearity_score_multilabel(family_metrics, "micro_f1"),
+        "linearity_macro_f1": _linearity_score_multilabel(family_metrics, "macro_f1"),
         "linearity_sample_jaccard": _linearity_score_multilabel(
             family_metrics, "sample_jaccard"
         ),
