@@ -21,9 +21,18 @@ class ProfilerConfig:
     random_state: int | None = None
     warn_on_densify: bool = True
     n_jobs: int | None = None
+    target_mode: Literal["auto", "singlelabel", "multilabel"] = "auto"
+    multilabel_stratification: Literal["auto", "iterative", "heuristic"] = "auto"
 
     def __post_init__(self) -> None:
         """Validate configuration values."""
+        if self.target_mode not in {"auto", "singlelabel", "multilabel"}:
+            raise ValueError(f"Unsupported target mode: {self.target_mode!r}")
+        if self.multilabel_stratification not in {"auto", "iterative", "heuristic"}:
+            raise ValueError(
+                "Unsupported multilabel stratification mode: "
+                f"{self.multilabel_stratification!r}"
+            )
         if self.budget not in BUDGETS:
             raise ValueError(f"Unsupported budget: {self.budget!r}")
         if self.topology not in {"off", "auto", "graph", "persistent"}:

@@ -54,10 +54,11 @@ print(report.to_json())
 - SciPy sparse matrices
 - pandas DataFrames and Series when pandas is installed
 - Binary and multiclass classification targets
+- Multilabel binary indicator targets with `target_mode="multilabel"` or
+  auto-detection for unambiguous 2D indicators
 - String or numeric labels treated as categorical class identifiers
 
-Regression, multilabel classification, and multioutput classification are not
-supported.
+Regression and multioutput classification are not supported.
 
 ## What It Returns
 
@@ -76,6 +77,25 @@ By default, `diagnose(...)` returns a plain-text recommendation. With
 - preprocessing and runtime metadata
 
 The report is JSON-serializable through `report.to_dict()` and `report.to_json()`.
+
+For multilabel targets, `separatix` compares probe families across micro F1,
+macro F1, and sample Jaccard rather than collapsing the evidence into a single
+weighted score. Optional iterative multilabel stratification can be installed
+with:
+
+```bash
+pip install "separatix[multilabel]"
+```
+
+Optional persistent-topology diagnostics can be installed with:
+
+```bash
+pip install "separatix[tda]"
+```
+
+For multilabel targets, persistent topology is supporting evidence only. When
+enabled, it is computed on capped boundary-candidate subsets and a small capped
+set of high-support label-positive subsets.
 
 ## Recommendation Categories
 
@@ -106,15 +126,19 @@ The recommendation is produced by a fixed, inspectable pipeline:
 1. Validate inputs and encode labels.
 2. Audit class counts, imbalance, sparsity, and basic dataset conditions.
 3. Compute geometry, neighborhood, boundary, fragmentation, and optional
-   topology diagnostics.
+   topology diagnostics, using a distinct multilabel path for binary indicator
+   targets.
 4. Run simple probe models and compare them to a dummy baseline.
 5. Build probe-family evidence with uncertainty estimates for `linear`,
    `smooth_nonlinear`, and `local_kernel`.
 6. Apply a 95% signal-vs-dummy gate before making any model-family
-   recommendation.
+   recommendation for single-label targets, or a two-of-three primary-metric
+   signal gate for multilabel targets.
 7. Use conservative escalation: keep the simpler family unless a more complex
    family has a clear uncertainty-adjusted advantage.
-8. Render both a plain-language summary and a structured report, including
+8. Treat fragmentation and optional topology as supporting structural evidence,
+   not as shortcuts around weak probe evidence.
+9. Render both a plain-language summary and a structured report, including
    `raw_best_family` and `recommended_family` when a report is requested.
 
 The full rationale and decision rules are documented in
@@ -139,6 +163,7 @@ recorded in the report.
 - [examples/circles_kernel_signal.py](/Users/niklasmelton/code/Separatix/examples/circles_kernel_signal.py)
 - [examples/recommendation_complexity_ladder.py](/Users/niklasmelton/code/Separatix/examples/recommendation_complexity_ladder.py)
 - [examples/multiclass_wine.py](/Users/niklasmelton/code/Separatix/examples/multiclass_wine.py)
+- [examples/openml_multilabel_yeast.py](/Users/niklasmelton/code/Separatix/examples/openml_multilabel_yeast.py)
 - [examples/sparse_text_like_embeddings.py](/Users/niklasmelton/code/Separatix/examples/sparse_text_like_embeddings.py)
 
 ## Related Work
