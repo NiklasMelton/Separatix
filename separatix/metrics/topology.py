@@ -332,6 +332,37 @@ def compute_multilabel_topology_diagnostics(
             reason="persistent topology disabled for this budget",
         )
 
+    boundary_indices = np.asarray(boundary.get("candidate_indices", []), dtype=int)
+    selected_labels, skipped_labels, counts = _selected_multilabel_topology_labels(
+        Y,
+        boundary_indices,
+        label_names=label_names,
+    )
+    if (
+        boundary_indices.shape[0] < _MIN_TOPOLOGY_SAMPLES
+        and not selected_labels
+    ):
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "multilabel_boundary_topology",
+                "reason": "too few boundary candidates",
+            }
+        )
+        return {
+            "target_type": "multilabel",
+            "mode": config.topology,
+            "boundary_topology": {
+                "sample_size": int(boundary_indices.shape[0]),
+                "skipped_reason": "too few boundary candidates",
+            },
+            "per_label_topology": [],
+            "selected_label_count": 0,
+            "skipped_labels": skipped_labels,
+            "skipped_label_count": max(0, int(Y.shape[1])),
+            "topology_strength": 0.0,
+            "skipped_reason": "no multilabel topology objects were computed",
+        }
+
     try:
         from ripser import ripser as _ripser  # noqa: F401
     except ImportError:
@@ -343,7 +374,6 @@ def compute_multilabel_topology_diagnostics(
         )
 
     cap = _topology_sample_cap(config)
-    boundary_indices = np.asarray(boundary.get("candidate_indices", []), dtype=int)
     strengths: list[float] = []
     boundary_topology: dict[str, Any]
     if boundary_indices.shape[0] < _MIN_TOPOLOGY_SAMPLES:
@@ -373,11 +403,6 @@ def compute_multilabel_topology_diagnostics(
         if "topology_strength" in boundary_topology:
             strengths.append(float(boundary_topology["topology_strength"]))
 
-    selected_labels, skipped_labels, counts = _selected_multilabel_topology_labels(
-        Y,
-        boundary_indices,
-        label_names=label_names,
-    )
     per_label_topology = []
     for label_index in selected_labels:
         positive_indices = _positive_indices_for_label(Y, label_index)
