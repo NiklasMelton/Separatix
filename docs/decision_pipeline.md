@@ -178,9 +178,7 @@ three primary metrics:
 - `macro_f1`
 - `sample_jaccard`
 
-Each metric keeps its own uncertainty estimate. The multilabel path does not
-collapse those primary metrics into one weighted aggregate before the family
-comparison.
+Each metric keeps its own uncertainty estimate. 
 
 The report then aggregates probes into three predictive families:
 
