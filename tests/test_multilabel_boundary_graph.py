@@ -51,8 +51,9 @@ def test_multilabel_boundary_candidates_record_trigger_reasons() -> None:
     assert boundary["trigger_counts"]["high_neighbor_hamming"] == 1
     assert boundary["trigger_counts"]["linear_vs_local_prediction_disagreement"] == 1
     assert "high_local_label_entropy" in boundary["trigger_names_by_index"][1]
-    assert "linear_vs_local_prediction_disagreement" in (
-        boundary["trigger_names_by_index"][3]
+    assert (
+        "linear_vs_local_prediction_disagreement"
+        in (boundary["trigger_names_by_index"][3])
     )
 
 

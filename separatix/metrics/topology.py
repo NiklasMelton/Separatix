@@ -338,10 +338,7 @@ def compute_multilabel_topology_diagnostics(
         boundary_indices,
         label_names=label_names,
     )
-    if (
-        boundary_indices.shape[0] < _MIN_TOPOLOGY_SAMPLES
-        and not selected_labels
-    ):
+    if boundary_indices.shape[0] < _MIN_TOPOLOGY_SAMPLES and not selected_labels:
         report_context.setdefault("skipped_diagnostics", []).append(
             {
                 "name": "multilabel_boundary_topology",

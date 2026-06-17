@@ -110,9 +110,7 @@ def compute_multilabel_boundary_candidates(
     local_hamming = np.asarray(
         neighborhood.get("local_neighbor_hamming_distance", []), dtype=float
     )
-    local_entropy = np.asarray(
-        neighborhood.get("local_label_entropy", []), dtype=float
-    )
+    local_entropy = np.asarray(neighborhood.get("local_label_entropy", []), dtype=float)
     local_cardinality_std = np.asarray(
         neighborhood.get("local_cardinality_std", []), dtype=float
     )
@@ -201,9 +199,7 @@ def compute_multilabel_boundary_candidates(
     strong_indices = np.flatnonzero(strong_candidate_mask)
     Y_dense = _dense_multilabel_matrix(Y)
     candidate_cardinality = (
-        Y_dense[indices].sum(axis=1).astype(float)
-        if indices.size
-        else np.array([])
+        Y_dense[indices].sum(axis=1).astype(float) if indices.size else np.array([])
     )
     trigger_thresholds = {
         **thresholds,

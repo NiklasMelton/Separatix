@@ -222,8 +222,9 @@ def test_recommendation_engine_keeps_linear_within_one_standard_error() -> None:
     )
 
 
-def test_multilabel_recommendation_engine_uses_fragmentation_for_high_capacity(
-) -> None:
+def test_multilabel_recommendation_engine_uses_fragmentation_for_high_capacity() -> (
+    None
+):
     metrics = {
         "probes": {
             "dummy": {
