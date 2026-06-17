@@ -231,9 +231,7 @@ def multilabel_subsample_indices(
                 train_size=n_samples,
                 random_state=config.random_state,
             )
-            train_idx, _ = next(
-                splitter.split(np.zeros((Y.shape[0], 1)), Y_dense)
-            )
+            train_idx, _ = next(splitter.split(np.zeros((Y.shape[0], 1)), Y_dense))
             return np.asarray(sorted(train_idx), dtype=int), "iterative"
         except (TypeError, ValueError):
             if config.multilabel_stratification == "iterative":
