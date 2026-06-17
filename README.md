@@ -1,6 +1,6 @@
 [![separatix logo](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_logo.png)](https://github.com/NiklasMelton/Separatix)
 
-# separatix
+# Separatix
 
 `separatix` profiles labeled feature spaces before classifier training and
 returns transparent, confidence-aware guidance about apparent classification
