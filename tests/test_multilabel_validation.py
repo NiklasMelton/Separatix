@@ -3,8 +3,7 @@ import pytest
 from scipy import sparse
 
 from separatix import diagnose
-from separatix.multilabel.validation import validate_multilabel_inputs
-from separatix.validation import validate_inputs
+from separatix.validation import validate_inputs, validate_multilabel_inputs
 
 
 def test_single_label_validator_still_rejects_multilabel() -> None:

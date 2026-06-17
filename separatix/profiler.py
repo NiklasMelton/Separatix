@@ -5,20 +5,35 @@ from __future__ import annotations
 import time
 from typing import Any, Literal
 
+import numpy as np
+from scipy import sparse
+
 from separatix.config import ProfilerConfig
-from separatix.metrics.audit import compute_dataset_audit
+from separatix.metrics.audit import compute_dataset_audit, compute_multilabel_audit
 from separatix.metrics.baseline import summarize_probe_family
 from separatix.metrics.boundary import compute_boundary_candidates
 from separatix.metrics.geometry import compute_geometry_diagnostics
 from separatix.metrics.graph import compute_graph_fragmentation
-from separatix.metrics.neighborhood import compute_neighborhood_diagnostics
+from separatix.metrics.neighborhood import (
+    compute_multilabel_neighborhood_diagnostics,
+    compute_neighborhood_diagnostics,
+)
 from separatix.metrics.topology import compute_topology_diagnostics
-from separatix.models.probes import run_model_probes
+from separatix.models.probes import run_model_probes, run_multilabel_model_probes
 from separatix.preprocessing import build_preprocessing_summary
-from separatix.recommendation.engine import compute_scores, make_recommendation
+from separatix.recommendation.engine import (
+    compute_multilabel_scores,
+    compute_scores,
+    make_multilabel_recommendation,
+    make_recommendation,
+)
 from separatix.recommendation.text import render_recommendation
 from separatix.report import DiagnosticReport
-from separatix.validation import validate_inputs
+from separatix.validation import (
+    is_multilabel_indicator,
+    validate_inputs,
+    validate_multilabel_inputs,
+)
 
 
 class ComplexityProfiler:
@@ -62,8 +77,6 @@ class ComplexityProfiler:
         if self.config.target_mode == "multilabel":
             return self._fit_multilabel(X, y)
         if self.config.target_mode == "auto":
-            from separatix.multilabel.validation import is_multilabel_indicator
-
             if is_multilabel_indicator(y, allow_single_column=False):
                 return self._fit_multilabel(X, y)
         return self._fit_singlelabel(X, y)
@@ -177,9 +190,135 @@ class ComplexityProfiler:
 
     def _fit_multilabel(self, X: Any, y: Any) -> ComplexityProfiler:
         """Run multilabel diagnostics and store the resulting report."""
-        from separatix.multilabel.pipeline import fit_multilabel
+        start = time.perf_counter()
+        validated = validate_multilabel_inputs(X, y)
+        report_context: dict[str, Any] = {
+            "warnings": list(validated.warnings),
+            "skipped_diagnostics": [],
+            "densification_events": [],
+        }
+        skipped_label_indices = np.flatnonzero(~validated.usable_label_mask)
+        if skipped_label_indices.size:
+            report_context["skipped_diagnostics"].append(
+                {
+                    "name": "unsupported_multilabel_columns",
+                    "reason": (
+                        "Some labels were constant or had fewer than two positive "
+                        "or negative examples."
+                    ),
+                    "count": int(skipped_label_indices.size),
+                    "labels": [
+                        str(validated.label_names[idx])
+                        for idx in skipped_label_indices[:20]
+                    ],
+                }
+            )
 
-        self.report_ = fit_multilabel(X, y, config=self.config)
+        Y_usable = (
+            validated.Y[:, validated.usable_label_mask]
+            if sparse.issparse(validated.Y)
+            else np.asarray(validated.Y)[:, validated.usable_label_mask]
+        )
+        label_names = validated.label_names[validated.usable_label_mask]
+        audit = compute_multilabel_audit(validated)
+        probes = run_multilabel_model_probes(
+            validated.X,
+            Y_usable,
+            config=self.config,
+            report_context=report_context,
+            label_names=label_names,
+        )
+        neighborhood = compute_multilabel_neighborhood_diagnostics(
+            validated.X,
+            Y_usable,
+            config=self.config,
+            report_context=report_context,
+        )
+        metrics = {
+            "audit": audit,
+            "probes": probes,
+            "baseline": self._multilabel_baseline_summary(probes),
+            "neighborhood": neighborhood,
+            "boundary": {
+                "skipped_reason": (
+                    "multilabel boundary diagnostics require label-set disagreement "
+                    "semantics and are not implemented in this phase"
+                )
+            },
+            "graph": {
+                "skipped_reason": (
+                    "multilabel graph fragmentation is not implemented until "
+                    "multilabel boundary candidates are available"
+                )
+            },
+            "topology": {
+                "skipped_reason": (
+                    "topology is skipped for the initial multilabel diagnostic path"
+                )
+            },
+        }
+        report_context["skipped_diagnostics"].extend(
+            [
+                {
+                    "name": "multilabel_boundary",
+                    "reason": metrics["boundary"]["skipped_reason"],
+                },
+                {
+                    "name": "multilabel_graph",
+                    "reason": metrics["graph"]["skipped_reason"],
+                },
+                {
+                    "name": "multilabel_topology",
+                    "reason": metrics["topology"]["skipped_reason"],
+                },
+            ]
+        )
+        scores = compute_multilabel_scores(
+            metrics,
+            skipped_count=len(report_context["skipped_diagnostics"]),
+            warning_count=len(report_context["warnings"]),
+        )
+        recommendation, confidence, decision_path, interpretations = (
+            make_multilabel_recommendation(scores, metrics)
+        )
+        class_summary = {
+            "target_type": "multilabel",
+            "n_labels": validated.n_labels,
+            "usable_label_count": int(np.sum(validated.usable_label_mask)),
+            "label_names": [str(item) for item in validated.label_names.tolist()],
+            "usable_label_names": [str(item) for item in label_names.tolist()],
+            "label_counts": [int(item) for item in validated.label_counts.tolist()],
+            "label_cardinality_mean": audit["label_cardinality_mean"],
+            "label_density": audit["label_density"],
+            "all_zero_sample_fraction": audit["all_zero_sample_fraction"],
+        }
+        report = DiagnosticReport(
+            recommendation=recommendation,
+            recommendation_text="",
+            confidence=confidence,
+            metrics=metrics,
+            scores=scores,
+            interpretations=interpretations,
+            decision_path=decision_path,
+            warnings=report_context["warnings"],
+            errors=[],
+            skipped_diagnostics=report_context["skipped_diagnostics"],
+            preprocessing=build_preprocessing_summary(
+                validated.X,
+                is_sparse=validated.is_sparse_X,
+            ),
+            sampling={
+                "probe": probes["linear"].get("sample_info"),
+                "neighbors": neighborhood.get("sampling"),
+                "boundary": None,
+            },
+            densification_events=report_context["densification_events"],
+            class_summary=class_summary,
+            runtime={"total_seconds": float(time.perf_counter() - start)},
+            config=self.config.to_dict(),
+        )
+        report.recommendation_text = render_recommendation(report)
+        self.report_ = report
         return self
 
     def report(self) -> DiagnosticReport:
@@ -191,3 +330,29 @@ class ComplexityProfiler:
     def recommendation(self) -> str:
         """Return the plain-text recommendation."""
         return self.report().recommendation_text
+
+    @staticmethod
+    def _multilabel_baseline_summary(
+        probes: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Return compact best-probe summaries for multilabel primary metrics."""
+        primary = ("micro_f1", "macro_f1", "sample_jaccard")
+        summary: dict[str, Any] = {
+            "primary_metrics": list(primary),
+            "best_by_metric": {},
+        }
+        for metric in primary:
+            candidates = [
+                (name, result[metric])
+                for name, result in probes.items()
+                if metric in result and name != "dummy"
+            ]
+            if not candidates:
+                summary["best_by_metric"][metric] = None
+            else:
+                name, score = max(candidates, key=lambda item: item[1])
+                summary["best_by_metric"][metric] = {
+                    "probe": name,
+                    "score": float(score),
+                }
+        return summary

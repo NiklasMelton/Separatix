@@ -4,10 +4,7 @@ import numpy as np
 import pytest
 
 from separatix.config import ProfilerConfig
-from separatix.multilabel.sampling import (
-    cap_multilabel_samples_for_budget,
-    choose_multilabel_cv,
-)
+from separatix.sampling import cap_multilabel_samples_for_budget, choose_multilabel_cv
 
 
 def test_multilabel_heuristic_sampling_is_deterministic() -> None:
