@@ -149,6 +149,7 @@ recorded in the report.
 - [examples/circles_kernel_signal.py](/Users/niklasmelton/code/Separatix/examples/circles_kernel_signal.py)
 - [examples/recommendation_complexity_ladder.py](/Users/niklasmelton/code/Separatix/examples/recommendation_complexity_ladder.py)
 - [examples/multiclass_wine.py](/Users/niklasmelton/code/Separatix/examples/multiclass_wine.py)
+- [examples/openml_multilabel_yeast.py](/Users/niklasmelton/code/Separatix/examples/openml_multilabel_yeast.py)
 - [examples/sparse_text_like_embeddings.py](/Users/niklasmelton/code/Separatix/examples/sparse_text_like_embeddings.py)
 
 ## Related Work
