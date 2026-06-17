@@ -1109,6 +1109,17 @@ def _multilabel_quality_flags(
                 "message": metrics["graph"]["warning"],
             }
         )
+    if metrics.get("topology", {}).get("skipped_reason") is not None:
+        flags.append(
+            {
+                "name": "topology_diagnostics_unavailable",
+                "severity": "info",
+                "message": (
+                    "Persistent multilabel topology was unavailable or skipped; "
+                    "it is only used as supporting evidence when present."
+                ),
+            }
+        )
     return flags
 
 
@@ -1184,6 +1195,8 @@ def compute_multilabel_scores(
     flags = _multilabel_quality_flags(
         metrics, family_metrics, skipped_count, warning_count
     )
+    topology = metrics.get("topology", {})
+    topology_strength = _topology_score(metrics)
     evidence = {
         "selection_rule": (
             "Compare probe families across micro F1, macro F1, and sample "
@@ -1196,6 +1209,10 @@ def compute_multilabel_scores(
         "signal_metrics_beating_dummy": signal_metrics,
         "best_clearly_beats_dummy_on_two_primary_metrics": len(signal_metrics) >= 2,
         "family_comparisons": comparisons,
+        "topology_available": bool(
+            topology_strength is not None and topology.get("skipped_reason") is None
+        ),
+        "topology_strength": topology_strength,
         "quality_flags": flags,
         "quality_score": float(
             np.mean([flag.get("severity") != "blocking" for flag in flags])
@@ -1221,6 +1238,7 @@ def compute_multilabel_scores(
         "fragmentation_score": _numeric(
             metrics.get("graph", {}).get("graph_fragmentation_score")
         ),
+        "topology_score": topology_strength,
         "reliability_score": evidence["quality_score"],
     }
 
@@ -1269,6 +1287,7 @@ def make_multilabel_recommendation(
             and float(graph["graph_fragmentation_score"]) >= 0.5
             and int(metrics.get("boundary", {}).get("boundary_sample_size", 0)) >= 10
         )
+        topology_available = bool(evidence.get("topology_available"))
         if linear_within >= 2 and linear_worse == 0:
             recommendation = LINEAR_LIKELY_SUFFICIENT
             decision_path.append(
@@ -1294,6 +1313,11 @@ def make_multilabel_recommendation(
                 decision_path.append(
                     "Local or kernel-style probes clearly improved over smooth "
                     "nonlinear probes on at least two primary multilabel metrics."
+                )
+            if topology_available:
+                decision_path.append(
+                    "Persistent multilabel topology was available as supporting "
+                    "structural evidence."
                 )
         else:
             recommendation = INCONCLUSIVE
@@ -1323,10 +1347,12 @@ def make_multilabel_recommendation(
         "neighborhood": "Higher values mean nearby samples share label sets.",
         "fragmentation": (
             "Higher values mean multilabel boundary candidates form a more "
-            "fragmented local graph."
+            "fragmented local graph; topology is supporting structural evidence "
+            "when available."
         ),
         "reliability": (
-            "Higher values mean essential multilabel evidence was available."
+            "Higher values mean essential multilabel evidence was available; "
+            "optional topology is non-blocking."
         ),
     }
     decision_path.append(

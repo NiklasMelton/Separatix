@@ -24,7 +24,10 @@ from separatix.metrics.neighborhood import (
     compute_multilabel_neighborhood_diagnostics,
     compute_neighborhood_diagnostics,
 )
-from separatix.metrics.topology import compute_topology_diagnostics
+from separatix.metrics.topology import (
+    compute_multilabel_topology_diagnostics,
+    compute_topology_diagnostics,
+)
 from separatix.models.probes import run_model_probes, run_multilabel_model_probes
 from separatix.preprocessing import build_preprocessing_summary
 from separatix.recommendation.engine import (
@@ -252,6 +255,14 @@ class ComplexityProfiler:
             boundary,
             config=self.config,
         )
+        topology = compute_multilabel_topology_diagnostics(
+            validated.X,
+            Y_usable,
+            boundary,
+            config=self.config,
+            report_context=report_context,
+            label_names=label_names,
+        )
         metrics = {
             "audit": audit,
             "probes": probes,
@@ -259,20 +270,8 @@ class ComplexityProfiler:
             "neighborhood": neighborhood,
             "boundary": boundary,
             "graph": graph,
-            "topology": {
-                "skipped_reason": (
-                    "topology is skipped for the initial multilabel diagnostic path"
-                )
-            },
+            "topology": topology,
         }
-        report_context["skipped_diagnostics"].extend(
-            [
-                {
-                    "name": "multilabel_topology",
-                    "reason": metrics["topology"]["skipped_reason"],
-                },
-            ]
-        )
         scores = compute_multilabel_scores(
             metrics,
             skipped_count=len(report_context["skipped_diagnostics"]),

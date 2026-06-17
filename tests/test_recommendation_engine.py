@@ -1,4 +1,7 @@
-from separatix.constants import HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
+from separatix.constants import (
+    HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED,
+    KERNEL_OR_LOCAL_RECOMMENDED,
+)
 from separatix.recommendation.engine import (
     compute_multilabel_scores,
     compute_scores,
@@ -259,3 +262,79 @@ def test_multilabel_recommendation_engine_uses_fragmentation_for_high_capacity(
 
     assert recommendation == HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
     assert any("fragmented graph" in step for step in path)
+
+
+def test_multilabel_topology_does_not_replace_fragmentation_gate() -> None:
+    metrics = {
+        "probes": {
+            "dummy": {
+                "micro_f1": 0.30,
+                "macro_f1": 0.25,
+                "sample_jaccard": 0.20,
+            },
+            "linear": {
+                "micro_f1": 0.55,
+                "macro_f1": 0.48,
+                "sample_jaccard": 0.42,
+            },
+            "smooth_poly": {
+                "micro_f1": 0.62,
+                "macro_f1": 0.58,
+                "sample_jaccard": 0.50,
+            },
+            "knn": {
+                "micro_f1": 0.82,
+                "macro_f1": 0.60,
+                "sample_jaccard": 0.76,
+            },
+        },
+        "neighborhood": {"mean_neighbor_jaccard": 0.45},
+        "graph": {"graph_fragmentation_score": 0.10},
+        "topology": {"target_type": "multilabel", "topology_strength": 1.0},
+        "boundary": {"boundary_sample_size": 18},
+        "audit": {"n_samples": 120, "usable_label_count": 4},
+    }
+    scores = compute_multilabel_scores(metrics, skipped_count=0, warning_count=0)
+    recommendation, _, path, _ = make_multilabel_recommendation(scores, metrics)
+
+    assert recommendation == KERNEL_OR_LOCAL_RECOMMENDED
+    assert any("topology was available" in step for step in path)
+
+
+def test_multilabel_skipped_topology_is_not_blocking() -> None:
+    metrics = {
+        "probes": {
+            "dummy": {
+                "micro_f1": 0.30,
+                "macro_f1": 0.25,
+                "sample_jaccard": 0.20,
+            },
+            "linear": {
+                "micro_f1": 0.55,
+                "macro_f1": 0.48,
+                "sample_jaccard": 0.42,
+            },
+            "smooth_poly": {
+                "micro_f1": 0.62,
+                "macro_f1": 0.58,
+                "sample_jaccard": 0.50,
+            },
+            "knn": {
+                "micro_f1": 0.82,
+                "macro_f1": 0.60,
+                "sample_jaccard": 0.76,
+            },
+        },
+        "neighborhood": {"mean_neighbor_jaccard": 0.45},
+        "graph": {"graph_fragmentation_score": 0.10},
+        "topology": {"target_type": "multilabel", "skipped_reason": "topology off"},
+        "boundary": {"boundary_sample_size": 18},
+        "audit": {"n_samples": 120, "usable_label_count": 4},
+    }
+    scores = compute_multilabel_scores(metrics, skipped_count=1, warning_count=0)
+    recommendation, confidence, _, _ = make_multilabel_recommendation(scores, metrics)
+    flags = metrics["multilabel_recommendation_evidence"]["quality_flags"]
+
+    assert recommendation == KERNEL_OR_LOCAL_RECOMMENDED
+    assert confidence == "medium"
+    assert not any(flag["severity"] == "blocking" for flag in flags)
