@@ -51,9 +51,15 @@ def _render_multilabel_recommendation(report: DiagnosticReport) -> str:
     if not caveats and report.skipped_diagnostics:
         caveats = [entry["reason"] for entry in report.skipped_diagnostics[:2]]
     caveat_text = "; ".join(caveats) if caveats else "no major caveats recorded"
+    grouping_note = (
+        "Grouped evaluation was used; cross-group evidence is primary.\n\n"
+        if report.grouping.get("provided")
+        else ""
+    )
     return (
         f"Recommendation: {headline}\n\n"
         f"{' '.join(report.decision_path[:3])}\n\n"
+        f"{grouping_note}"
         "This is a multilabel diagnostic. Evidence is compared across micro F1, "
         "macro F1, and sample Jaccard rather than collapsed into one weighted "
         "score.\n\n"
@@ -74,9 +80,15 @@ def render_recommendation(report: DiagnosticReport) -> str:
         caveats = [entry["reason"] for entry in report.skipped_diagnostics[:2]]
     suggestion_text = "\n".join(f"- {item}" for item in suggestions)
     caveat_text = "; ".join(caveats) if caveats else "no major caveats recorded"
+    grouping_note = (
+        "Grouped evaluation was used; cross-group evidence is primary.\n\n"
+        if report.grouping.get("provided")
+        else ""
+    )
     return (
         f"Recommendation: {headline}\n\n"
         f"{' '.join(report.decision_path[:3])}\n\n"
+        f"{grouping_note}"
         f"Suggested next models:\n{suggestion_text}\n\n"
         f"Confidence: {report.confidence}.\n"
         f"Main caveats: {caveat_text}."

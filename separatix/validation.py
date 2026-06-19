@@ -10,6 +10,13 @@ from scipy import sparse
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.multiclass import type_of_target
 
+from separatix.grouping import (
+    multilabel_group_support,
+    singlelabel_group_support,
+    summarize_groups,
+    validate_groups,
+)
+
 
 @dataclass
 class ValidatedInput:
@@ -23,6 +30,12 @@ class ValidatedInput:
     n_samples: int
     n_features: int
     n_classes: int
+    groups: np.ndarray | None
+    grouping_summary: dict[str, Any]
+    evaluable_y_encoded: np.ndarray
+    evaluable_classes_: np.ndarray
+    evaluable_groups: np.ndarray | None
+    evaluable_mask: np.ndarray
 
 
 @dataclass
@@ -42,6 +55,8 @@ class ValidatedMultilabelInput:
     usable_label_mask: np.ndarray
     all_zero_sample_count: int
     warnings: list[str]
+    groups: np.ndarray | None
+    grouping_summary: dict[str, Any]
 
 
 def _coerce_pandas(X: Any) -> Any:
@@ -152,7 +167,7 @@ def _validate_multilabel_target(y: Any) -> tuple[Any, np.ndarray, bool]:
     return Y.astype(np.int8, copy=False), _label_names(y, Y.shape[1]), False
 
 
-def validate_inputs(X: Any, y: Any) -> ValidatedInput:
+def validate_inputs(X: Any, y: Any, *, groups: Any = None) -> ValidatedInput:
     """Validate features and labels for classification diagnostics."""
     X = _coerce_pandas(X)
     if not sparse.issparse(X):
@@ -199,6 +214,45 @@ def validate_inputs(X: Any, y: Any) -> ValidatedInput:
     classes_ = encoder.classes_
     if classes_.shape[0] < 2:
         raise ValueError("At least two classes are required.")
+    group_info = validate_groups(groups, n_samples=int(X.shape[0]))
+    grouping_summary = summarize_groups(group_info.encoded if group_info else None)
+
+    evaluable_mask = np.ones_like(y_encoded, dtype=bool)
+    evaluable_y_encoded = y_encoded
+    evaluable_classes = classes_
+    evaluable_groups = group_info.encoded if group_info else None
+    if group_info is not None:
+        support = singlelabel_group_support(y_encoded, group_info.encoded)
+        evaluable_mask = np.asarray(support["evaluable_mask"], dtype=bool)
+        supported_classes = np.asarray(support["supported_classes"], dtype=int)
+        grouping_summary.update(
+            {
+                "supervised_evaluation_mode": "group_cross_validation",
+                "groups_per_class": {
+                    str(classes_[cls]): int(count)
+                    for cls, count in support["groups_per_class"].items()
+                },
+                "supported_singlelabel_classes": [
+                    str(classes_[cls]) for cls in supported_classes.tolist()
+                ],
+                "skipped_singlelabel_classes": [
+                    str(classes_[cls]) for cls in support["skipped_classes"]
+                ],
+            }
+        )
+        if supported_classes.shape[0] < 2:
+            raise ValueError(
+                "At least two single-label classes must each appear in at least "
+                "two distinct groups."
+            )
+        supported_inverse = {int(cls): idx for idx, cls in enumerate(supported_classes)}
+        evaluable_original = y_encoded[evaluable_mask]
+        evaluable_y_encoded = np.asarray(
+            [supported_inverse[int(label)] for label in evaluable_original],
+            dtype=int,
+        )
+        evaluable_classes = classes_[supported_classes]
+        evaluable_groups = group_info.encoded[evaluable_mask]
 
     return ValidatedInput(
         X=X,
@@ -209,10 +263,18 @@ def validate_inputs(X: Any, y: Any) -> ValidatedInput:
         n_samples=int(X.shape[0]),
         n_features=int(X.shape[1]),
         n_classes=int(classes_.shape[0]),
+        groups=group_info.encoded if group_info else None,
+        grouping_summary=grouping_summary,
+        evaluable_y_encoded=evaluable_y_encoded,
+        evaluable_classes_=evaluable_classes,
+        evaluable_groups=evaluable_groups,
+        evaluable_mask=evaluable_mask,
     )
 
 
-def validate_multilabel_inputs(X: Any, y: Any) -> ValidatedMultilabelInput:
+def validate_multilabel_inputs(
+    X: Any, y: Any, *, groups: Any = None
+) -> ValidatedMultilabelInput:
     """Validate features and multilabel indicator targets."""
     X_checked, is_sparse_X = _validate_feature_matrix(X)
     Y_checked, label_names, is_sparse_Y = _validate_multilabel_target(y)
@@ -226,6 +288,11 @@ def validate_multilabel_inputs(X: Any, y: Any) -> ValidatedMultilabelInput:
     label_prevalence = label_counts / max(1, n_samples)
     negatives = n_samples - label_counts
     usable_label_mask = (label_counts >= 2) & (negatives >= 2)
+    group_info = validate_groups(groups, n_samples=n_samples)
+    grouping_summary = summarize_groups(group_info.encoded if group_info else None)
+    if group_info is not None:
+        group_mask = multilabel_group_support(Y_checked, group_info.encoded)
+        usable_label_mask = usable_label_mask & group_mask
     all_zero_rows = np.asarray(Y_checked.sum(axis=1)).ravel() == 0
     warnings: list[str] = []
     if Y_checked.shape[1] == 1:
@@ -241,7 +308,22 @@ def validate_multilabel_inputs(X: Any, y: Any) -> ValidatedMultilabelInput:
     if not bool(np.any(usable_label_mask)):
         raise ValueError(
             "At least one multilabel column needs at least two positive and two "
-            "negative examples."
+            "negative examples, and at least two distinct groups on both the "
+            "positive and negative side when groups are provided."
+        )
+    if group_info is not None:
+        grouping_summary.update(
+            {
+                "supervised_evaluation_mode": "group_cross_validation",
+                "supported_multilabel_labels": [
+                    str(label_names[idx])
+                    for idx in np.flatnonzero(usable_label_mask).tolist()
+                ],
+                "skipped_multilabel_labels": [
+                    str(label_names[idx])
+                    for idx in np.flatnonzero(~usable_label_mask).tolist()
+                ],
+            }
         )
 
     return ValidatedMultilabelInput(
@@ -258,4 +340,6 @@ def validate_multilabel_inputs(X: Any, y: Any) -> ValidatedMultilabelInput:
         usable_label_mask=usable_label_mask,
         all_zero_sample_count=int(np.sum(all_zero_rows)),
         warnings=warnings,
+        groups=group_info.encoded if group_info else None,
+        grouping_summary=grouping_summary,
     )

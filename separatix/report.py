@@ -20,6 +20,8 @@ _TERSE_PRUNED_KEYS = frozenset(
         "predictions",
         "strong_candidate_indices",
         "trigger_names_by_index",
+        "indices",
+        "row_indices",
     }
 )
 
@@ -55,6 +57,7 @@ class DiagnosticReport:
     sampling: dict[str, Any]
     densification_events: list[dict[str, Any]]
     class_summary: dict[str, Any]
+    grouping: dict[str, Any]
     runtime: dict[str, Any]
     config: dict[str, Any]
 

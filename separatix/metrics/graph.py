@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 import numpy as np
+from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from sklearn.neighbors import NearestNeighbors
 
@@ -13,7 +14,7 @@ from separatix.constants import BUDGETS
 from separatix.sampling import cap_multilabel_samples_for_budget, cap_samples_for_budget
 
 
-def _empty_fragmentation(indices_size: int) -> dict[str, Any]:
+def _empty_fragmentation(indices_size: int, *, warning: str) -> dict[str, Any]:
     return {
         "component_count": 0,
         "largest_component_fraction": 1.0 if indices_size else 0.0,
@@ -21,19 +22,58 @@ def _empty_fragmentation(indices_size: int) -> dict[str, Any]:
         "small_component_count": 0,
         "cross_class_edge_density": 0.0,
         "graph_fragmentation_score": 0.0,
-        "warning": "Not enough boundary candidates for graph diagnostics.",
+        "warning": warning,
     }
 
 
-def _fragmentation_summary(X_boundary: Any, y_boundary: np.ndarray) -> dict[str, Any]:
-    if len(y_boundary) < 3:
-        return _empty_fragmentation(len(y_boundary))
-
-    k = min(len(y_boundary) - 1, 10)
-    nn = NearestNeighbors(n_neighbors=k + 1)
+def _knn_graph(
+    X_boundary: Any,
+    *,
+    groups: np.ndarray | None,
+    cross_group: bool,
+) -> csr_matrix | None:
+    """Build a symmetric neighborhood graph, optionally excluding same-group edges."""
+    n_rows = X_boundary.shape[0]
+    if n_rows < 3:
+        return None
+    k = min(n_rows - 1, 10)
+    query_neighbors = n_rows if cross_group and groups is not None else k + 1
+    nn = NearestNeighbors(n_neighbors=query_neighbors)
     nn.fit(X_boundary)
-    graph = nn.kneighbors_graph(X_boundary, mode="connectivity")
-    graph = graph.maximum(graph.T)
+    indices = nn.kneighbors(
+        X_boundary, n_neighbors=query_neighbors, return_distance=False
+    )
+    rows: list[int] = []
+    cols: list[int] = []
+    for row_idx in range(n_rows):
+        neighbors = indices[row_idx]
+        mask = neighbors != row_idx
+        if cross_group and groups is not None:
+            mask &= groups[neighbors] != groups[row_idx]
+        neighbors = neighbors[mask][:k]
+        for col_idx in neighbors.tolist():
+            rows.append(row_idx)
+            cols.append(col_idx)
+    if not rows:
+        return None
+    data = np.ones(len(rows), dtype=int)
+    graph = csr_matrix((data, (rows, cols)), shape=(n_rows, n_rows))
+    return graph.maximum(graph.T)
+
+
+def _fragmentation_summary(
+    X_boundary: Any,
+    y_boundary: np.ndarray,
+    *,
+    groups: np.ndarray | None = None,
+    cross_group: bool = False,
+) -> dict[str, Any]:
+    graph = _knn_graph(X_boundary, groups=groups, cross_group=cross_group)
+    if graph is None:
+        return _empty_fragmentation(
+            len(y_boundary),
+            warning="Not enough boundary candidates for graph diagnostics.",
+        )
     n_components, labels = connected_components(graph, directed=False)
     sizes = np.bincount(labels)
     probs = sizes / max(1, sizes.sum())
@@ -68,6 +108,8 @@ def _bootstrap_fragmentation(
     y_boundary: np.ndarray,
     *,
     config: ProfilerConfig,
+    groups: np.ndarray | None = None,
+    cross_group: bool = False,
 ) -> dict[str, int | float | None]:
     budget = cast(dict[str, object], BUDGETS[config.budget])
     repeats = int(cast(int, budget["bootstrap_repeats"]))
@@ -80,17 +122,38 @@ def _bootstrap_fragmentation(
 
     rng = np.random.default_rng(config.random_state)
     scores: list[float] = []
-    for _ in range(repeats):
-        sample_indices = rng.integers(0, len(y_boundary), size=len(y_boundary))
-        if np.unique(sample_indices).size < 3:
-            continue
-        summary = _fragmentation_summary(
-            X_boundary[sample_indices],
-            y_boundary[sample_indices],
-        )
-        if "warning" not in summary:
-            scores.append(float(summary["graph_fragmentation_score"]))
-
+    if groups is None:
+        for _ in range(repeats):
+            sample_indices = rng.integers(0, len(y_boundary), size=len(y_boundary))
+            if np.unique(sample_indices).size < 3:
+                continue
+            summary = _fragmentation_summary(
+                X_boundary[sample_indices],
+                y_boundary[sample_indices],
+                cross_group=cross_group,
+            )
+            if "warning" not in summary:
+                scores.append(float(summary["graph_fragmentation_score"]))
+    else:
+        unique_groups = np.unique(groups)
+        for _ in range(repeats):
+            sampled_groups = rng.choice(
+                unique_groups, size=unique_groups.shape[0], replace=True
+            )
+            row_blocks = [
+                np.flatnonzero(groups == group_id) for group_id in sampled_groups
+            ]
+            sample_indices = np.concatenate(row_blocks).astype(int)
+            if np.unique(sample_indices).size < 3:
+                continue
+            summary = _fragmentation_summary(
+                X_boundary[sample_indices],
+                y_boundary[sample_indices],
+                groups=groups[sample_indices],
+                cross_group=cross_group,
+            )
+            if "warning" not in summary:
+                scores.append(float(summary["graph_fragmentation_score"]))
     return {
         "graph_fragmentation_bootstrap_repeats": len(scores),
         "graph_fragmentation_bootstrap_mean": float(np.mean(scores))
@@ -106,26 +169,63 @@ def compute_graph_fragmentation(
     boundary: dict[str, Any],
     *,
     config: ProfilerConfig,
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Compute fragmentation diagnostics over boundary candidates."""
     indices = np.asarray(boundary.get("candidate_indices", []), dtype=int)
     if indices.size < 3:
         return {
-            **_empty_fragmentation(indices.size),
+            **_empty_fragmentation(
+                indices.size,
+                warning="Not enough boundary candidates for graph diagnostics.",
+            ),
             "graph_fragmentation_bootstrap_repeats": 0,
             "graph_fragmentation_bootstrap_mean": None,
             "graph_fragmentation_bootstrap_std": None,
         }
 
-    X_boundary = X[indices]
+    X_boundary = X[indices] if hasattr(X, "__getitem__") else X
     y_boundary = y[indices]
+    groups_boundary = groups[indices] if groups is not None else None
     X_boundary, y_boundary, sample_info = cap_samples_for_budget(
-        X_boundary, y_boundary, config=config, reason="boundary"
+        X_boundary,
+        y_boundary,
+        config=config,
+        reason="boundary",
+        groups=groups_boundary,
+    )
+    groups_used = (
+        groups_boundary[np.asarray(sample_info["indices"], dtype=int)]
+        if groups_boundary is not None
+        else None
+    )
+    row_level = _fragmentation_summary(X_boundary, y_boundary)
+    if groups_used is None:
+        return {
+            **row_level,
+            **_bootstrap_fragmentation(X_boundary, y_boundary, config=config),
+            "sampling": sample_info,
+            "primary_scope": "row_level",
+        }
+    cross_group = _fragmentation_summary(
+        X_boundary,
+        y_boundary,
+        groups=groups_used,
+        cross_group=True,
     )
     return {
-        **_fragmentation_summary(X_boundary, y_boundary),
-        **_bootstrap_fragmentation(X_boundary, y_boundary, config=config),
+        **cross_group,
+        **_bootstrap_fragmentation(
+            X_boundary,
+            y_boundary,
+            config=config,
+            groups=groups_used,
+            cross_group=True,
+        ),
+        "cross_group": cross_group,
+        "row_level": row_level,
         "sampling": sample_info,
+        "primary_scope": "cross_group",
     }
 
 
@@ -196,36 +296,30 @@ def _multilabel_component_metrics(
     }
 
 
-def _empty_multilabel_fragmentation(indices_size: int) -> dict[str, Any]:
-    """Return an empty multilabel graph diagnostic payload."""
-    return {
-        "component_count": 0,
-        "largest_component_fraction": 1.0 if indices_size else 0.0,
-        "component_size_entropy": 0.0,
-        "small_component_count": 0,
-        "graph_fragmentation_score": 0.0,
-        "mean_edge_label_jaccard": 1.0,
-        "mean_edge_hamming_distance": 0.0,
-        "low_label_overlap_edge_fraction": 0.0,
-        "component_label_diversity": 0.0,
-        "component_cardinality_variance": 0.0,
-        "warning": "Not enough multilabel boundary candidates for graph diagnostics.",
-    }
-
-
 def _multilabel_fragmentation_summary(
     X_boundary: Any,
     Y_boundary: np.ndarray,
+    *,
+    groups: np.ndarray | None = None,
+    cross_group: bool = False,
 ) -> dict[str, Any]:
-    """Compute graph fragmentation summaries over multilabel boundary candidates."""
-    if Y_boundary.shape[0] < 3:
-        return _empty_multilabel_fragmentation(Y_boundary.shape[0])
-
-    k = min(Y_boundary.shape[0] - 1, 10)
-    nn = NearestNeighbors(n_neighbors=k + 1)
-    nn.fit(X_boundary)
-    graph = nn.kneighbors_graph(X_boundary, mode="connectivity")
-    graph = graph.maximum(graph.T)
+    graph = _knn_graph(X_boundary, groups=groups, cross_group=cross_group)
+    if graph is None:
+        return {
+            "component_count": 0,
+            "largest_component_fraction": 1.0 if Y_boundary.shape[0] else 0.0,
+            "component_size_entropy": 0.0,
+            "small_component_count": 0,
+            "graph_fragmentation_score": 0.0,
+            "mean_edge_label_jaccard": 1.0,
+            "mean_edge_hamming_distance": 0.0,
+            "low_label_overlap_edge_fraction": 0.0,
+            "component_label_diversity": 0.0,
+            "component_cardinality_variance": 0.0,
+            "warning": (
+                "Not enough multilabel boundary candidates for graph diagnostics."
+            ),
+        }
     n_components, labels = connected_components(graph, directed=False)
     sizes = np.bincount(labels)
     probs = sizes / max(1, sizes.sum())
@@ -249,74 +343,53 @@ def _multilabel_fragmentation_summary(
     }
 
 
-def _bootstrap_multilabel_fragmentation(
-    X_boundary: Any,
-    Y_boundary: np.ndarray,
-    *,
-    config: ProfilerConfig,
-) -> dict[str, int | float | None]:
-    """Bootstrap the multilabel structural fragmentation score."""
-    budget = cast(dict[str, object], BUDGETS[config.budget])
-    repeats = int(cast(int, budget["bootstrap_repeats"]))
-    if repeats <= 0 or Y_boundary.shape[0] < 3:
-        return {
-            "graph_fragmentation_bootstrap_repeats": 0,
-            "graph_fragmentation_bootstrap_mean": None,
-            "graph_fragmentation_bootstrap_std": None,
-        }
-
-    rng = np.random.default_rng(config.random_state)
-    scores: list[float] = []
-    for _ in range(repeats):
-        sample_indices = rng.integers(0, Y_boundary.shape[0], size=Y_boundary.shape[0])
-        if np.unique(sample_indices).size < 3:
-            continue
-        summary = _multilabel_fragmentation_summary(
-            X_boundary[sample_indices],
-            Y_boundary[sample_indices],
-        )
-        if "warning" not in summary:
-            scores.append(float(summary["graph_fragmentation_score"]))
-
-    return {
-        "graph_fragmentation_bootstrap_repeats": len(scores),
-        "graph_fragmentation_bootstrap_mean": float(np.mean(scores))
-        if scores
-        else None,
-        "graph_fragmentation_bootstrap_std": float(np.std(scores)) if scores else None,
-    }
-
-
 def compute_multilabel_graph_fragmentation(
     X: Any,
     Y: Any,
     boundary: dict[str, Any],
     *,
     config: ProfilerConfig,
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Compute graph fragmentation diagnostics over multilabel boundary candidates."""
+    """Compute graph fragmentation summaries over multilabel boundary candidates."""
     indices = np.asarray(boundary.get("candidate_indices", []), dtype=int)
     if indices.size < 3:
-        return {
-            **_empty_multilabel_fragmentation(indices.size),
-            "graph_fragmentation_bootstrap_repeats": 0,
-            "graph_fragmentation_bootstrap_mean": None,
-            "graph_fragmentation_bootstrap_std": None,
-        }
-
-    X_boundary = X[indices] if not hasattr(X, "toarray") else X[indices, :]
+        return _multilabel_fragmentation_summary(
+            np.zeros((0, 1)), np.zeros((0, 1), dtype=int)
+        )
+    X_boundary = X[indices] if hasattr(X, "__getitem__") else X
     Y_boundary = Y[indices] if not hasattr(Y, "toarray") else Y[indices, :]
+    groups_boundary = groups[indices] if groups is not None else None
     X_boundary, Y_boundary, sample_info = cap_multilabel_samples_for_budget(
         X_boundary,
         Y_boundary,
         config=config,
         reason="boundary",
+        groups=groups_boundary,
     )
-    Y_boundary_dense = _dense_multilabel_matrix(Y_boundary)
+    Y_dense = _dense_multilabel_matrix(Y_boundary)
+    groups_used = (
+        groups_boundary[np.asarray(sample_info["indices"], dtype=int)]
+        if groups_boundary is not None
+        else None
+    )
+    row_level = _multilabel_fragmentation_summary(X_boundary, Y_dense)
+    if groups_used is None:
+        return {
+            **row_level,
+            "sampling": sample_info,
+            "primary_scope": "row_level",
+        }
+    cross_group = _multilabel_fragmentation_summary(
+        X_boundary,
+        Y_dense,
+        groups=groups_used,
+        cross_group=True,
+    )
     return {
-        **_multilabel_fragmentation_summary(X_boundary, Y_boundary_dense),
-        **_bootstrap_multilabel_fragmentation(
-            X_boundary, Y_boundary_dense, config=config
-        ),
+        **cross_group,
+        "cross_group": cross_group,
+        "row_level": row_level,
         "sampling": sample_info,
+        "primary_scope": "cross_group",
     }

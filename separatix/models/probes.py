@@ -205,15 +205,26 @@ def run_model_probes(
     config: ProfilerConfig,
     report_context: dict[str, Any],
     class_labels: np.ndarray | None = None,
+    groups: np.ndarray | None = None,
 ) -> dict[str, dict[str, object]]:
     """Run lightweight baseline and probe classifiers."""
     budget = cast(BudgetConfig, BUDGETS[config.budget])
     X_used, y_used, sample_info = cap_samples_for_budget(
-        X, y, config=config, reason="probe"
+        X, y, config=config, reason="probe", groups=groups
     )
-    cv = choose_cv(y_used, budget["cv_folds"])
+    groups_used = (
+        groups[np.asarray(sample_info["indices"], dtype=int)]
+        if groups is not None
+        else None
+    )
+    cv, cv_method = choose_cv(
+        y_used,
+        budget["cv_folds"],
+        groups=groups_used,
+        random_state=config.random_state,
+    )
     warnings_list = report_context.setdefault("warnings", [])
-    if cv is None:
+    if cv is None and groups is None:
         record_warning(
             (
                 "Very small class counts forced low-reliability "
@@ -222,6 +233,51 @@ def run_model_probes(
             warnings_list,
             UserWarning,
         )
+    if cv is None and groups is not None:
+        skipped = report_context.setdefault("skipped_diagnostics", [])
+        skipped.append(
+            {
+                "name": "group_cross_validation",
+                "reason": (
+                    "No valid group-disjoint supervised split was available after "
+                    "filtering unsupported classes."
+                ),
+            }
+        )
+        return {
+            name: {
+                "skipped_reason": "group-disjoint supervised split unavailable",
+                "model_name": estimator.__class__.__name__,
+                "sample_info": sample_info,
+                "evaluation_mode": "group_split_unavailable",
+                "cv_stratification_method": cv_method,
+            }
+            for name, estimator in {
+                "dummy": DummyClassifier(strategy="prior"),
+                "linear": _linear_classifier(X_used),
+                "knn": KNeighborsClassifier(
+                    n_neighbors=min(
+                        max(1, len(y_used) - 1),
+                        min(15, max(3, int(np.sqrt(len(y_used))))),
+                    )
+                ),
+            }.items()
+        } | {
+            "smooth_poly": {
+                "skipped_reason": "group-disjoint supervised split unavailable",
+                "model_name": "PolynomialFeatures+LogisticRegression",
+                "sample_info": sample_info,
+                "evaluation_mode": "group_split_unavailable",
+                "cv_stratification_method": cv_method,
+            },
+            "kernel_approx": {
+                "skipped_reason": "group-disjoint supervised split unavailable",
+                "model_name": "RBFSampler+SGDClassifier",
+                "sample_info": sample_info,
+                "evaluation_mode": "group_split_unavailable",
+                "cv_stratification_method": cv_method,
+            },
+        }
     probes: dict[str, Any] = {
         "dummy": DummyClassifier(strategy="prior"),
         "linear": _linear_classifier(X_used),
@@ -240,6 +296,7 @@ def run_model_probes(
             X_used,
             y_used,
             cv=cv,
+            groups=groups_used,
         )
         metrics = summarize_predictions(y_used, preds, class_labels=class_labels)
         metrics.update(
@@ -249,6 +306,7 @@ def run_model_probes(
                 y_used,
                 repeats=budget["bootstrap_repeats"],
                 random_state=config.random_state,
+                groups=groups_used,
             )
         )
         metrics.update(
@@ -257,6 +315,7 @@ def run_model_probes(
                 "runtime_seconds": float(time.perf_counter() - start),
                 "sample_info": sample_info,
                 "evaluation_mode": evaluation_mode,
+                "cv_stratification_method": cv_method,
                 "predictions": preds.tolist(),
             }
         )
@@ -268,6 +327,7 @@ def run_model_probes(
         reason="smooth_nonlinear_probe",
         config=config,
         report_context=report_context,
+        groups=groups_used,
     )
     if smooth_info["skipped"]:
         results["smooth_poly"] = {
@@ -278,13 +338,19 @@ def run_model_probes(
     else:
         dense_X = np.asarray(smooth_info["X"])
         dense_y = np.asarray(smooth_info["y"])
+        dense_groups = smooth_info.get("groups")
         dtype = dense_X.dtype if dense_X.dtype is not None else np.dtype(float)
         expanded_features = _quadratic_feature_count(dense_X.shape[1])
         estimated_expanded_mb = _estimate_dense_mb(
             dense_X.shape[0], expanded_features, dtype
         )
         metadata = _smooth_probe_metadata(dense_X, sample_info)
-        cv_smooth = choose_cv(dense_y, budget["cv_folds"])
+        cv_smooth, cv_smooth_method = choose_cv(
+            dense_y,
+            budget["cv_folds"],
+            groups=dense_groups,
+            random_state=config.random_state,
+        )
         if (
             expanded_features <= _MAX_FULL_QUADRATIC_FEATURES
             and estimated_expanded_mb <= config.max_dense_mb
@@ -296,6 +362,7 @@ def run_model_probes(
                 dense_X,
                 dense_y,
                 cv=cv_smooth,
+                groups=dense_groups,
             )
             metrics = summarize_predictions(dense_y, preds, class_labels=class_labels)
             metrics.update(
@@ -305,6 +372,7 @@ def run_model_probes(
                     dense_y,
                     repeats=budget["bootstrap_repeats"],
                     random_state=config.random_state,
+                    groups=dense_groups,
                 )
             )
             metrics.update(
@@ -314,6 +382,7 @@ def run_model_probes(
                     "model_name": "PolynomialFeatures+LogisticRegression",
                     "runtime_seconds": float(time.perf_counter() - start),
                     "evaluation_mode": evaluation_mode,
+                    "cv_stratification_method": cv_smooth_method,
                     "predictions": preds.tolist(),
                 }
             )
@@ -347,6 +416,7 @@ def run_model_probes(
                     dense_X,
                     dense_y,
                     cv=cv_smooth,
+                    groups=dense_groups,
                 )
                 metrics = summarize_predictions(
                     dense_y, preds, class_labels=class_labels
@@ -358,6 +428,7 @@ def run_model_probes(
                         dense_y,
                         repeats=budget["bootstrap_repeats"],
                         random_state=config.random_state,
+                        groups=dense_groups,
                     )
                 )
                 metrics.update(
@@ -371,6 +442,7 @@ def run_model_probes(
                         "model_name": "PolynomialCountSketch+LogisticRegression",
                         "runtime_seconds": float(time.perf_counter() - start),
                         "evaluation_mode": evaluation_mode,
+                        "cv_stratification_method": cv_smooth_method,
                         "predictions": preds.tolist(),
                     }
                 )
@@ -383,6 +455,7 @@ def run_model_probes(
             reason="kernel_approximation_probe",
             config=config,
             report_context=report_context,
+            groups=groups_used,
         )
         if dense_info["skipped"]:
             results["kernel_approx"] = {
@@ -420,7 +493,13 @@ def run_model_probes(
                 estimator,
                 dense_info["X"],
                 dense_info["y"],
-                cv=choose_cv(dense_info["y"], budget["cv_folds"]),
+                cv=choose_cv(
+                    dense_info["y"],
+                    budget["cv_folds"],
+                    groups=dense_info.get("groups"),
+                    random_state=config.random_state,
+                )[0],
+                groups=dense_info.get("groups"),
             )
             metrics = summarize_predictions(
                 dense_info["y"], preds, class_labels=class_labels
@@ -432,6 +511,7 @@ def run_model_probes(
                     dense_info["y"],
                     repeats=budget["bootstrap_repeats"],
                     random_state=config.random_state,
+                    groups=dense_info.get("groups"),
                 )
             )
             metrics.update(
@@ -440,6 +520,12 @@ def run_model_probes(
                     "runtime_seconds": float(time.perf_counter() - start),
                     "sample_info": sample_info,
                     "evaluation_mode": evaluation_mode,
+                    "cv_stratification_method": choose_cv(
+                        dense_info["y"],
+                        budget["cv_folds"],
+                        groups=dense_info.get("groups"),
+                        random_state=config.random_state,
+                    )[1],
                     "predictions": preds.tolist(),
                 }
             )
@@ -460,10 +546,17 @@ def _ensure_dense_X_for_multilabel(
     reason: str,
     config: ProfilerConfig,
     report_context: dict[str, Any],
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Densify X for multilabel-only probes without altering single-label helpers."""
     if not sparse.issparse(X):
-        return {"X": np.asarray(X), "Y": Y, "performed": False, "skipped": False}
+        return {
+            "X": np.asarray(X),
+            "Y": Y,
+            "groups": groups,
+            "performed": False,
+            "skipped": False,
+        }
 
     densification_events = report_context.setdefault("densification_events", [])
     warnings_list = report_context.setdefault("warnings", [])
@@ -515,7 +608,12 @@ def _ensure_dense_X_for_multilabel(
         skipped.append({"name": reason, "reason": "dense subsample would be too small"})
         return {"X": None, "Y": Y, "performed": False, "skipped": True}
 
-    indices, method = multilabel_subsample_indices(Y, n_samples=n_used, config=config)
+    indices, method = multilabel_subsample_indices(
+        Y,
+        n_samples=n_used,
+        config=config,
+        groups=groups,
+    )
     event["sampling_used"] = True
     event["sampling_method"] = method
     event["n_used"] = int(indices.shape[0])
@@ -533,6 +631,7 @@ def _ensure_dense_X_for_multilabel(
     return {
         "X": X[indices, :].toarray(),
         "Y": Y_used,
+        "groups": groups[indices] if groups is not None else None,
         "performed": True,
         "skipped": False,
     }
@@ -548,15 +647,30 @@ def _evaluate_multilabel_probe(
     budget: BudgetConfig,
     label_names: np.ndarray,
     sample_info: dict[str, Any],
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Evaluate one multilabel probe and return report metrics."""
     start = time.perf_counter()
-    cv, cv_method = choose_multilabel_cv(Y, max_folds=budget["cv_folds"], config=config)
+    cv, cv_method = choose_multilabel_cv(
+        Y,
+        max_folds=budget["cv_folds"],
+        config=config,
+        groups=groups,
+    )
+    if cv is None and groups is not None:
+        return {
+            "skipped_reason": "group-disjoint supervised split unavailable",
+            "model_name": name,
+            "sample_info": sample_info,
+            "evaluation_mode": "group_split_unavailable",
+            "cv_stratification_method": cv_method,
+        }
     preds, evaluation_mode = evaluate_multilabel_estimator(
         estimator,
         X,
         Y,
         cv=cv,
+        groups=groups,
     )
     metrics = summarize_multilabel_predictions(Y, preds, label_names=label_names)
     metrics.update(
@@ -568,6 +682,7 @@ def _evaluate_multilabel_probe(
             random_state=config.random_state,
             config=config,
             label_names=label_names,
+            groups=groups,
         )
     )
     metrics.update(
@@ -590,6 +705,7 @@ def run_multilabel_model_probes(
     config: ProfilerConfig,
     report_context: dict[str, Any],
     label_names: np.ndarray,
+    groups: np.ndarray | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Run lightweight multilabel baseline and probe classifiers."""
     budget = cast(BudgetConfig, BUDGETS[config.budget])
@@ -598,6 +714,12 @@ def run_multilabel_model_probes(
         Y,
         config=config,
         reason="probe",
+        groups=groups,
+    )
+    groups_used = (
+        groups[np.asarray(sample_info["indices"], dtype=int)]
+        if groups is not None
+        else None
     )
     y_dense = _dense_multilabel_matrix(Y_used)
     n_neighbors = min(
@@ -620,6 +742,7 @@ def run_multilabel_model_probes(
             budget=budget,
             label_names=label_names,
             sample_info=sample_info,
+            groups=groups_used,
         )
 
     dense_info = _ensure_dense_X_for_multilabel(
@@ -628,6 +751,7 @@ def run_multilabel_model_probes(
         reason="smooth_nonlinear_probe",
         config=config,
         report_context=report_context,
+        groups=groups_used,
     )
     if dense_info["skipped"]:
         results["smooth_poly"] = {
@@ -661,6 +785,7 @@ def run_multilabel_model_probes(
                 budget=budget,
                 label_names=label_names,
                 sample_info=sample_info,
+                groups=dense_info.get("groups"),
             )
             results["smooth_poly"].update(metadata)
             results["smooth_poly"]["probe_variant"] = "full_quadratic"
@@ -695,6 +820,7 @@ def run_multilabel_model_probes(
                     budget=budget,
                     label_names=label_names,
                     sample_info=sample_info,
+                    groups=dense_info.get("groups"),
                 )
                 results["smooth_poly"].update(metadata)
                 results["smooth_poly"]["probe_variant"] = "low_rank_quadratic"
@@ -707,6 +833,7 @@ def run_multilabel_model_probes(
             reason="kernel_approximation_probe",
             config=config,
             report_context=report_context,
+            groups=groups_used,
         )
         if kernel_info["skipped"]:
             results["kernel_approx"] = {
@@ -751,6 +878,7 @@ def run_multilabel_model_probes(
                 budget=budget,
                 label_names=label_names,
                 sample_info=sample_info,
+                groups=kernel_info.get("groups"),
             )
     else:
         results["kernel_approx"] = {

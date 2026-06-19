@@ -12,6 +12,7 @@ def diagnose(
     X: Any,
     y: Any,
     *,
+    groups: Any = None,
     return_report: bool = False,
     target_mode: Literal["auto", "singlelabel", "multilabel"] = "auto",
     multilabel_stratification: Literal["auto", "iterative", "heuristic"] = "auto",
@@ -35,7 +36,7 @@ def diagnose(
         random_state=random_state,
         warn_on_densify=warn_on_densify,
     )
-    report = profiler.fit(X, y).report_
+    report = profiler.fit(X, y, groups=groups).report_
     if report is None:
         raise RuntimeError("Profiler did not produce a report.")
     return report if return_report else report.recommendation_text
