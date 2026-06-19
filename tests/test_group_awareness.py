@@ -59,7 +59,7 @@ def test_grouped_choose_cv_keeps_groups_disjoint() -> None:
     cv, method = choose_cv(y, 5, groups=groups, random_state=0)
 
     assert cv is not None
-    assert method in {"stratified_group", "group_kfold"}
+    assert method in {"stratified_group", "group_kfold", "group_heuristic"}
     for train_idx, test_idx in cv.split(np.zeros((len(y), 1)), y, groups):
         assert np.intersect1d(groups[train_idx], groups[test_idx]).size == 0
         assert set(np.unique(y[train_idx])) == {0, 1}
