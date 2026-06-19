@@ -443,6 +443,7 @@ def grouped_singlelabel_cv(
 ) -> tuple[Any | None, str]:
     """Choose the best available group-safe CV splitter for single-label data."""
     group_support = min(np.unique(groups[y == cls]).shape[0] for cls in np.unique(y))
+    all_rows = np.arange(y.shape[0], dtype=int)
     for n_splits in range(min(max_folds, int(group_support)), 1, -1):
         splitter = StratifiedGroupKFold(
             n_splits=n_splits,
@@ -464,6 +465,49 @@ def grouped_singlelabel_cv(
             for train_idx, test_idx in splits
         ):
             return fallback, "group_kfold"
+        unique_groups, group_rows = _group_rows(groups)
+        group_class_counts = np.asarray(
+            [
+                np.bincount(y[rows], minlength=np.unique(y).shape[0]).astype(float)
+                for rows in group_rows
+            ]
+        )
+        order = np.argsort(-group_class_counts.sum(axis=1))
+        fold_group_indices: list[list[int]] = [[] for _ in range(n_splits)]
+        fold_sizes = np.zeros(n_splits, dtype=int)
+        fold_class_totals = np.zeros(
+            (n_splits, group_class_counts.shape[1]),
+            dtype=float,
+        )
+        for idx in order.tolist():
+            best_fold = min(
+                range(n_splits),
+                key=lambda fold_idx: (
+                    float(
+                        np.var(fold_class_totals[fold_idx] + group_class_counts[idx])
+                    ),
+                    int(fold_sizes[fold_idx]),
+                    fold_idx,
+                ),
+            )
+            fold_group_indices[best_fold].append(idx)
+            fold_sizes[best_fold] += int(group_rows[idx].shape[0])
+            fold_class_totals[best_fold] += group_class_counts[idx]
+        heuristic_splits: list[tuple[np.ndarray, np.ndarray]] = []
+        for fold in fold_group_indices:
+            if not fold:
+                heuristic_splits = []
+                break
+            test_idx = np.sort(
+                np.concatenate([group_rows[idx] for idx in fold]).astype(int)
+            )
+            train_idx = np.setdiff1d(all_rows, test_idx)
+            if np.unique(y[train_idx]).shape[0] != np.unique(y).shape[0]:
+                heuristic_splits = []
+                break
+            heuristic_splits.append((train_idx, test_idx))
+        if heuristic_splits:
+            return PrecomputedSplitter(heuristic_splits), "group_heuristic"
     return None, "group_split_unavailable"
 
 
