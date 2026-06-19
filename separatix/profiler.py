@@ -81,19 +81,21 @@ class ComplexityProfiler:
         )
         self.report_: DiagnosticReport | None = None
 
-    def fit(self, X: Any, y: Any) -> ComplexityProfiler:
+    def fit(self, X: Any, y: Any, *, groups: Any = None) -> ComplexityProfiler:
         """Run diagnostics and store the resulting report in report_."""
         if self.config.target_mode == "multilabel":
-            return self._fit_multilabel(X, y)
+            return self._fit_multilabel(X, y, groups=groups)
         if self.config.target_mode == "auto":
             if is_multilabel_indicator(y, allow_single_column=False):
-                return self._fit_multilabel(X, y)
-        return self._fit_singlelabel(X, y)
+                return self._fit_multilabel(X, y, groups=groups)
+        return self._fit_singlelabel(X, y, groups=groups)
 
-    def _fit_singlelabel(self, X: Any, y: Any) -> ComplexityProfiler:
+    def _fit_singlelabel(
+        self, X: Any, y: Any, *, groups: Any = None
+    ) -> ComplexityProfiler:
         """Run single-label diagnostics and store the resulting report."""
         start = time.perf_counter()
-        validated = validate_inputs(X, y)
+        validated = validate_inputs(X, y, groups=groups)
         report_context: dict[str, Any] = {
             "warnings": [],
             "skipped_diagnostics": [],
@@ -108,36 +110,48 @@ class ComplexityProfiler:
         )
         geometry = compute_geometry_diagnostics(
             validated.X,
-            validated.y_encoded,
+            validated.evaluable_y_encoded,
             config=self.config,
             report_context=report_context,
+            groups=validated.evaluable_groups,
         )
         probes = run_model_probes(
-            validated.X,
-            validated.y_encoded,
+            validated.X[validated.evaluable_mask]
+            if not sparse.issparse(validated.X)
+            else validated.X[validated.evaluable_mask, :],
+            validated.evaluable_y_encoded,
             config=self.config,
             report_context=report_context,
-            class_labels=validated.classes_,
+            class_labels=validated.evaluable_classes_,
+            groups=validated.evaluable_groups,
         )
         baseline = summarize_probe_family(probes)
         neighborhood = compute_neighborhood_diagnostics(
-            validated.X,
-            validated.y_encoded,
+            validated.X[validated.evaluable_mask]
+            if not sparse.issparse(validated.X)
+            else validated.X[validated.evaluable_mask, :],
+            validated.evaluable_y_encoded,
             config=self.config,
             report_context=report_context,
+            groups=validated.evaluable_groups,
         )
         boundary = compute_boundary_candidates(
-            validated.y_encoded, neighborhood, probes
+            validated.evaluable_y_encoded, neighborhood, probes
         )
         graph = compute_graph_fragmentation(
-            validated.X,
-            validated.y_encoded,
+            validated.X[validated.evaluable_mask]
+            if not sparse.issparse(validated.X)
+            else validated.X[validated.evaluable_mask, :],
+            validated.evaluable_y_encoded,
             boundary,
             config=self.config,
+            groups=validated.evaluable_groups,
         )
         topology = compute_topology_diagnostics(
-            validated.X,
-            validated.y_encoded,
+            validated.X[validated.evaluable_mask]
+            if not sparse.issparse(validated.X)
+            else validated.X[validated.evaluable_mask, :],
+            validated.evaluable_y_encoded,
             boundary,
             geometry,
             config=self.config,
@@ -164,6 +178,7 @@ class ComplexityProfiler:
         class_summary = {
             "n_classes": validated.n_classes,
             "classes": validated.classes_.tolist(),
+            "evaluable_classes": validated.evaluable_classes_.tolist(),
             "class_counts": audit["class_counts"],
             "imbalance_ratio": audit["imbalance_ratio"],
             "min_class_count": min(audit["class_counts"].values()),
@@ -190,6 +205,7 @@ class ComplexityProfiler:
             },
             densification_events=report_context["densification_events"],
             class_summary=class_summary,
+            grouping=validated.grouping_summary,
             runtime={"total_seconds": float(time.perf_counter() - start)},
             config=self.config.to_dict(),
         )
@@ -197,10 +213,12 @@ class ComplexityProfiler:
         self.report_ = report
         return self
 
-    def _fit_multilabel(self, X: Any, y: Any) -> ComplexityProfiler:
+    def _fit_multilabel(
+        self, X: Any, y: Any, *, groups: Any = None
+    ) -> ComplexityProfiler:
         """Run multilabel diagnostics and store the resulting report."""
         start = time.perf_counter()
-        validated = validate_multilabel_inputs(X, y)
+        validated = validate_multilabel_inputs(X, y, groups=groups)
         report_context: dict[str, Any] = {
             "warnings": list(validated.warnings),
             "skipped_diagnostics": [],
@@ -236,12 +254,14 @@ class ComplexityProfiler:
             config=self.config,
             report_context=report_context,
             label_names=label_names,
+            groups=validated.groups,
         )
         neighborhood = compute_multilabel_neighborhood_diagnostics(
             validated.X,
             Y_usable,
             config=self.config,
             report_context=report_context,
+            groups=validated.groups,
         )
         boundary = compute_multilabel_boundary_candidates(
             Y_usable,
@@ -254,6 +274,7 @@ class ComplexityProfiler:
             Y_usable,
             boundary,
             config=self.config,
+            groups=validated.groups,
         )
         topology = compute_multilabel_topology_diagnostics(
             validated.X,
@@ -313,6 +334,7 @@ class ComplexityProfiler:
             },
             densification_events=report_context["densification_events"],
             class_summary=class_summary,
+            grouping=validated.grouping_summary,
             runtime={"total_seconds": float(time.perf_counter() - start)},
             config=self.config.to_dict(),
         )

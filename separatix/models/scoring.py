@@ -16,10 +16,14 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+from sklearn.model_selection import (
+    GroupShuffleSplit,
+    StratifiedKFold,
+    StratifiedShuffleSplit,
+)
 
 from separatix.config import ProfilerConfig
-from separatix.sampling import choose_multilabel_holdout
+from separatix.sampling import choose_multilabel_holdout, grouped_singlelabel_cv
 
 
 def _prepared_estimator(estimator: Any, train_size: int) -> Any:
@@ -31,19 +35,38 @@ def _prepared_estimator(estimator: Any, train_size: int) -> Any:
     return fitted
 
 
-def choose_cv(y: np.ndarray, max_folds: int) -> object | None:
+def choose_cv(
+    y: np.ndarray,
+    max_folds: int,
+    *,
+    groups: np.ndarray | None = None,
+    random_state: int | None = None,
+) -> tuple[object | None, str]:
     """Choose a stratified validation strategy based on class counts."""
+    if groups is not None:
+        return grouped_singlelabel_cv(
+            y,
+            groups,
+            max_folds=max_folds,
+            random_state=random_state,
+        )
     min_count = min(Counter(y).values())
     if min_count >= 5:
         n_splits = min(max_folds, 5)
-        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+        return StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=0
+        ), "stratified"
     if min_count >= 3:
         n_splits = min(max_folds, 3)
-        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+        return StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=0
+        ), "stratified"
     if min_count >= 2:
         n_splits = min(max_folds, 2)
-        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
-    return None
+        return StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=0
+        ), "stratified"
+    return None, "resubstitution_low_reliability"
 
 
 def evaluate_estimator(
@@ -52,6 +75,7 @@ def evaluate_estimator(
     y: np.ndarray,
     *,
     cv: Any | None,
+    groups: np.ndarray | None = None,
 ) -> tuple[np.ndarray, str]:
     """Return predictions with a partitioned CV path or a low-reliability fallback."""
     if cv is None:
@@ -59,12 +83,16 @@ def evaluate_estimator(
         return fitted.predict(X), "resubstitution_low_reliability"
 
     predictions = np.empty_like(y)
-    for train_idx, test_idx in cv.split(X, y):
+    split_iter = cv.split(X, y, groups) if groups is not None else cv.split(X, y)
+    for train_idx, test_idx in split_iter:
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             X[train_idx], y[train_idx]
         )
         predictions[test_idx] = fitted.predict(X[test_idx])
-    return predictions, "cross_validation"
+    return (
+        predictions,
+        "group_cross_validation" if groups is not None else "cross_validation",
+    )
 
 
 def summarize_stability(
@@ -74,6 +102,7 @@ def summarize_stability(
     *,
     repeats: int,
     random_state: int | None,
+    groups: np.ndarray | None = None,
 ) -> dict[str, int | float | None]:
     """Estimate score stability using repeated stratified holdout splits."""
     if repeats <= 0 or len(np.unique(y)) < 2 or np.min(np.bincount(y)) < 2:
@@ -83,13 +112,26 @@ def summarize_stability(
             "stability_balanced_accuracy_std": None,
         }
 
-    splitter = StratifiedShuffleSplit(
-        n_splits=repeats,
-        test_size=0.25,
-        random_state=random_state,
+    splitter = (
+        GroupShuffleSplit(
+            n_splits=repeats,
+            test_size=0.25,
+            random_state=random_state,
+        )
+        if groups is not None
+        else StratifiedShuffleSplit(
+            n_splits=repeats,
+            test_size=0.25,
+            random_state=random_state,
+        )
     )
     scores: list[float] = []
-    for train_idx, test_idx in splitter.split(X, y):
+    split_iter = (
+        splitter.split(X, y, groups) if groups is not None else splitter.split(X, y)
+    )
+    for train_idx, test_idx in split_iter:
+        if np.unique(y[train_idx]).shape[0] < np.unique(y).shape[0]:
+            continue
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             X[train_idx], y[train_idx]
         )
@@ -194,6 +236,7 @@ def evaluate_multilabel_estimator(
     Y: Any,
     *,
     cv: Any | None,
+    groups: np.ndarray | None = None,
 ) -> tuple[np.ndarray, str]:
     """Return multilabel predictions with CV or a low-reliability fallback."""
     Y_dense = _dense_multilabel_matrix(Y)
@@ -205,14 +248,20 @@ def evaluate_multilabel_estimator(
         )
 
     predictions = np.zeros_like(Y_dense, dtype=np.int8)
-    for train_idx, test_idx in cv.split(X, Y_dense):
+    split_iter = (
+        cv.split(X, Y_dense, groups) if groups is not None else cv.split(X, Y_dense)
+    )
+    for train_idx, test_idx in split_iter:
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             _slice_rows(X, train_idx), Y_dense[train_idx]
         )
         predictions[test_idx] = _dense_multilabel_matrix(
             fitted.predict(_slice_rows(X, test_idx))
         )
-    return predictions, "cross_validation"
+    return (
+        predictions,
+        "group_cross_validation" if groups is not None else "cross_validation",
+    )
 
 
 def _per_label_metrics(
@@ -354,6 +403,7 @@ def summarize_multilabel_stability(
     random_state: int | None,
     config: ProfilerConfig,
     label_names: np.ndarray,
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Estimate multilabel metric stability with repeated holdout splits."""
     if repeats <= 0:
@@ -365,7 +415,12 @@ def summarize_multilabel_stability(
             "stability_sample_jaccard_std": None,
         }
 
-    holdout, method = choose_multilabel_holdout(Y, repeats=repeats, config=config)
+    holdout, method = choose_multilabel_holdout(
+        Y,
+        repeats=repeats,
+        config=config,
+        groups=groups,
+    )
     if holdout is None:
         return {
             "stability_repeats": 0,
@@ -381,7 +436,12 @@ def summarize_multilabel_stability(
         "macro_f1": [],
         "sample_jaccard": [],
     }
-    for train_idx, test_idx in holdout.split(X, Y_dense):
+    split_iter = (
+        holdout.split(X, Y_dense, groups)
+        if groups is not None
+        else holdout.split(X, Y_dense)
+    )
+    for train_idx, test_idx in split_iter:
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             _slice_rows(X, train_idx), Y_dense[train_idx]
         )

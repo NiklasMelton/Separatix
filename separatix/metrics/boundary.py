@@ -7,6 +7,32 @@ from typing import Any
 import numpy as np
 
 
+def _aligned_predictions(
+    probe_result: dict[str, Any],
+    row_indices: np.ndarray,
+) -> np.ndarray | None:
+    """Align probe predictions to one sampled row order when possible."""
+    predictions = probe_result.get("predictions")
+    sample_info = probe_result.get("sample_info", {})
+    probe_indices = np.asarray(sample_info.get("indices", []), dtype=int)
+    if predictions is None:
+        return None
+    predictions_array = np.asarray(predictions)
+    if probe_indices.size == 0 and predictions_array.shape[0] == row_indices.shape[0]:
+        return predictions_array
+    if probe_indices.shape[0] != predictions_array.shape[0]:
+        return None
+    mapping = {
+        int(idx): predictions_array[pos] for pos, idx in enumerate(probe_indices)
+    }
+    aligned: list[Any] = []
+    for idx in row_indices.tolist():
+        if idx not in mapping:
+            return None
+        aligned.append(mapping[idx])
+    return np.asarray(aligned)
+
+
 def compute_boundary_candidates(
     y: np.ndarray,
     neighborhood: dict[str, Any],
@@ -15,6 +41,9 @@ def compute_boundary_candidates(
     """Extract boundary candidate indices from ambiguity and disagreement."""
     local_entropy = np.asarray(neighborhood.get("local_entropy", []), dtype=float)
     local_ambiguity = np.asarray(neighborhood.get("local_ambiguity", []), dtype=float)
+    row_indices = np.asarray(
+        neighborhood.get("row_indices", list(range(local_entropy.shape[0]))), dtype=int
+    )
     if local_entropy.size == 0 or local_ambiguity.size == 0:
         return {
             "candidate_indices": [],
@@ -28,16 +57,13 @@ def compute_boundary_candidates(
     candidate_mask = (local_entropy >= entropy_threshold) | (
         local_ambiguity >= ambiguity_threshold
     )
-    linear_preds = probes.get("linear", {}).get("predictions")
-    knn_preds = probes.get("knn", {}).get("predictions")
-    if (
-        linear_preds is not None
-        and knn_preds is not None
-        and len(linear_preds) == candidate_mask.shape[0]
-    ):
+    linear_preds = _aligned_predictions(probes.get("linear", {}), row_indices)
+    knn_preds = _aligned_predictions(probes.get("knn", {}), row_indices)
+    if linear_preds is not None and knn_preds is not None:
         disagreement = np.asarray(linear_preds) != np.asarray(knn_preds)
         candidate_mask = candidate_mask | disagreement
-    indices = np.flatnonzero(candidate_mask)
+    sample_positions = np.flatnonzero(candidate_mask)
+    indices = row_indices[sample_positions]
     counts = {
         str(cls): int(np.sum(y[indices] == cls))
         for cls in np.unique(y[indices])
@@ -45,6 +71,7 @@ def compute_boundary_candidates(
     }
     return {
         "candidate_indices": indices.tolist(),
+        "sample_position_indices": sample_positions.tolist(),
         "candidate_fraction": float(indices.shape[0] / max(1, y.shape[0])),
         "boundary_sample_size": int(indices.shape[0]),
         "class_composition": counts,
@@ -114,6 +141,9 @@ def compute_multilabel_boundary_candidates(
     local_cardinality_std = np.asarray(
         neighborhood.get("local_cardinality_std", []), dtype=float
     )
+    row_indices = np.asarray(
+        neighborhood.get("row_indices", list(range(local_jaccard.shape[0]))), dtype=int
+    )
     if (
         local_jaccard.size == 0
         or local_hamming.size == 0
@@ -160,16 +190,18 @@ def compute_multilabel_boundary_candidates(
         ),
         None,
     )
-    linear_predictions = probes.get("linear", {}).get("predictions")
+    probes.get("linear", {}).get("predictions")
     prediction_similarity_threshold = None
-    if (
-        linear_predictions is not None
-        and local_probe is not None
-        and len(linear_predictions) == local_jaccard.shape[0]
-    ):
+    aligned_linear = _aligned_predictions(probes.get("linear", {}), row_indices)
+    aligned_local = (
+        _aligned_predictions(local_probe, row_indices)
+        if local_probe is not None
+        else None
+    )
+    if aligned_linear is not None and aligned_local is not None:
         prediction_similarity = _sample_prediction_jaccard(
-            np.asarray(linear_predictions, dtype=int),
-            np.asarray(local_probe["predictions"], dtype=int),
+            np.asarray(aligned_linear, dtype=int),
+            np.asarray(aligned_local, dtype=int),
         )
         prediction_similarity_threshold = float(
             np.quantile(prediction_similarity, 0.25)
@@ -195,8 +227,10 @@ def compute_multilabel_boundary_candidates(
 
     candidate_mask = trigger_count_array >= 1
     strong_candidate_mask = trigger_count_array >= 2
-    indices = np.flatnonzero(candidate_mask)
-    strong_indices = np.flatnonzero(strong_candidate_mask)
+    sample_positions = np.flatnonzero(candidate_mask)
+    strong_positions = np.flatnonzero(strong_candidate_mask)
+    indices = row_indices[sample_positions]
+    strong_indices = row_indices[strong_positions]
     Y_dense = _dense_multilabel_matrix(Y)
     candidate_cardinality = (
         Y_dense[indices].sum(axis=1).astype(float) if indices.size else np.array([])
@@ -208,6 +242,7 @@ def compute_multilabel_boundary_candidates(
     return {
         "candidate_indices": indices.tolist(),
         "strong_candidate_indices": strong_indices.tolist(),
+        "sample_position_indices": sample_positions.tolist(),
         "candidate_fraction": float(indices.shape[0] / max(1, Y_dense.shape[0])),
         "strong_candidate_fraction": float(
             strong_indices.shape[0] / max(1, Y_dense.shape[0])
