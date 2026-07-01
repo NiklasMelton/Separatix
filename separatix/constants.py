@@ -6,6 +6,7 @@ LINEAR_LIKELY_SUFFICIENT = "linear_likely_sufficient"
 SMOOTH_NONLINEAR_RECOMMENDED = "smooth_nonlinear_recommended"
 KERNEL_OR_LOCAL_RECOMMENDED = "kernel_or_local_recommended"
 HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED = "high_capacity_or_partitioning_recommended"
+FEEDFORWARD_MLP_RECOMMENDED = "feedforward_mlp_recommended"
 FEATURE_OR_LABEL_BOTTLENECK_LIKELY = "feature_or_label_bottleneck_likely"
 INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY = "insufficient_data_or_unreliable_geometry"
 INCONCLUSIVE = "inconclusive"
@@ -15,6 +16,7 @@ KERNEL_OR_LOCAL_REGRESSION_RECOMMENDED = "kernel_or_local_regression_recommended
 HIGH_CAPACITY_OR_PARTITIONING_REGRESSION_RECOMMENDED = (
     "higher_capacity_or_partitioning_regression_recommended"
 )
+FEEDFORWARD_MLP_REGRESSION_RECOMMENDED = "feedforward_mlp_regression_recommended"
 FEATURE_OR_TARGET_BOTTLENECK_LIKELY = "feature_or_target_bottleneck_likely"
 INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY = (
     "insufficient_data_or_unreliable_regression_geometry"
@@ -27,6 +29,9 @@ RECOMMENDATION_LABELS = {
     KERNEL_OR_LOCAL_RECOMMENDED: "Kernel or local model likely useful.",
     HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED: (
         "Higher-capacity or partitioning model likely useful."
+    ),
+    FEEDFORWARD_MLP_RECOMMENDED: (
+        "Feed-forward MLP probe family clearly preferred among evaluated probes."
     ),
     FEATURE_OR_LABEL_BOTTLENECK_LIKELY: "Feature or label bottleneck likely.",
     INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY: (
@@ -42,6 +47,9 @@ RECOMMENDATION_LABELS = {
     ),
     HIGH_CAPACITY_OR_PARTITIONING_REGRESSION_RECOMMENDED: (
         "Higher-capacity or partitioning regression model likely useful."
+    ),
+    FEEDFORWARD_MLP_REGRESSION_RECOMMENDED: (
+        "Feed-forward MLP regressor probes clearly preferred among evaluated probes."
     ),
     FEATURE_OR_TARGET_BOTTLENECK_LIKELY: "Feature or target bottleneck likely.",
     INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY: (

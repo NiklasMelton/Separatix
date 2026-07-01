@@ -34,6 +34,11 @@ from separatix.metrics.topology import (
     compute_regression_topology_diagnostics,
     compute_topology_diagnostics,
 )
+from separatix.models.mlp import (
+    maybe_run_multilabel_mlp_probes,
+    maybe_run_regression_mlp_probes,
+    maybe_run_singlelabel_mlp_probes,
+)
 from separatix.models.probes import (
     run_model_probes,
     run_multilabel_model_probes,
@@ -79,6 +84,11 @@ class ComplexityProfiler:
         random_state: int | None = None,
         warn_on_densify: bool = True,
         n_jobs: int | None = None,
+        mlp_probes: bool = False,
+        mlp_device: Literal["cpu", "auto", "cuda", "mps"] = "cpu",
+        mlp_trigger_skill_threshold: float = 0.75,
+        mlp_min_improvement: float = 0.02,
+        mlp_max_parameters: int | None = None,
     ) -> None:
         """Initialize the profiler with validated configuration."""
         self.config = ProfilerConfig(
@@ -93,6 +103,11 @@ class ComplexityProfiler:
             random_state=random_state,
             warn_on_densify=warn_on_densify,
             n_jobs=n_jobs,
+            mlp_probes=mlp_probes,
+            mlp_device=mlp_device,
+            mlp_trigger_skill_threshold=mlp_trigger_skill_threshold,
+            mlp_min_improvement=mlp_min_improvement,
+            mlp_max_parameters=mlp_max_parameters,
         )
         self.report_: DiagnosticReport | None = None
 
@@ -189,6 +204,22 @@ class ComplexityProfiler:
             skipped_count=len(report_context["skipped_diagnostics"]),
             warning_count=len(report_context["warnings"]),
         )
+        mlp_evidence = maybe_run_singlelabel_mlp_probes(
+            validated.X[validated.evaluable_mask]
+            if not sparse.issparse(validated.X)
+            else validated.X[validated.evaluable_mask, :],
+            validated.evaluable_y_encoded,
+            config=self.config,
+            metrics=metrics,
+            report_context=report_context,
+            class_labels=validated.evaluable_classes_,
+            groups=validated.evaluable_groups,
+        )
+        metrics["mlp_trigger_evidence"] = mlp_evidence.get("trigger", {})
+        metrics["mlp_probes"] = mlp_evidence
+        metrics["mlp_recommendation_evidence"] = {
+            key: value for key, value in mlp_evidence.items() if key != "trigger"
+        }
         recommendation, confidence, decision_path, interpretations = (
             make_recommendation(scores, metrics)
         )
@@ -219,6 +250,7 @@ class ComplexityProfiler:
                 "probe": probes["linear"].get("sample_info"),
                 "neighbors": neighborhood.get("sampling"),
                 "boundary": graph.get("sampling"),
+                "mlp": mlp_evidence.get("sample_info"),
             },
             densification_events=report_context["densification_events"],
             class_summary=class_summary,
@@ -329,6 +361,20 @@ class ComplexityProfiler:
             skipped_count=len(report_context["skipped_diagnostics"]),
             warning_count=len(report_context["warnings"]),
         )
+        mlp_evidence = maybe_run_regression_mlp_probes(
+            validated.X,
+            Y_usable,
+            config=self.config,
+            metrics=metrics,
+            report_context=report_context,
+            target_names=target_names,
+            groups=validated.groups,
+        )
+        metrics["mlp_trigger_evidence"] = mlp_evidence.get("trigger", {})
+        metrics["mlp_probes"] = mlp_evidence
+        metrics["mlp_recommendation_evidence"] = {
+            key: value for key, value in mlp_evidence.items() if key != "trigger"
+        }
         recommendation, confidence, decision_path, interpretations = (
             make_regression_recommendation(scores, metrics)
         )
@@ -366,6 +412,7 @@ class ComplexityProfiler:
                 "probe": probes["linear"].get("sample_info"),
                 "neighbors": neighborhood.get("sampling"),
                 "boundary": None,
+                "mlp": mlp_evidence.get("sample_info"),
                 "topology": [
                     obj.get("sampling")
                     for obj in topology.get("objects", [])
@@ -467,6 +514,20 @@ class ComplexityProfiler:
             skipped_count=len(report_context["skipped_diagnostics"]),
             warning_count=len(report_context["warnings"]),
         )
+        mlp_evidence = maybe_run_multilabel_mlp_probes(
+            validated.X,
+            Y_usable,
+            config=self.config,
+            metrics=metrics,
+            report_context=report_context,
+            label_names=label_names,
+            groups=validated.groups,
+        )
+        metrics["mlp_trigger_evidence"] = mlp_evidence.get("trigger", {})
+        metrics["mlp_probes"] = mlp_evidence
+        metrics["mlp_recommendation_evidence"] = {
+            key: value for key, value in mlp_evidence.items() if key != "trigger"
+        }
         recommendation, confidence, decision_path, interpretations = (
             make_multilabel_recommendation(scores, metrics)
         )
@@ -500,6 +561,7 @@ class ComplexityProfiler:
                 "probe": probes["linear"].get("sample_info"),
                 "neighbors": neighborhood.get("sampling"),
                 "boundary": graph.get("sampling"),
+                "mlp": mlp_evidence.get("sample_info"),
             },
             densification_events=report_context["densification_events"],
             class_summary=class_summary,

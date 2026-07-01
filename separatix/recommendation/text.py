@@ -24,6 +24,11 @@ _SUGGESTIONS = {
         "boosted trees",
         "higher-capacity neural network",
     ],
+    "feedforward_mlp_recommended": [
+        "a compact one-hidden-layer MLP as the first neural baseline",
+        "a matched two-hidden-layer MLP if the compact network underfits",
+        "retain a strong linear or kernel baseline for calibration",
+    ],
     "feature_or_label_bottleneck_likely": [
         "feature cleanup or enrichment",
         "label audit",
@@ -58,6 +63,11 @@ _SUGGESTIONS = {
         "tree ensembles",
         "boosted-tree regression",
         "partitioned or mixture-of-experts regressors",
+    ],
+    "feedforward_mlp_regression_recommended": [
+        "a compact one-hidden-layer MLP regressor as the first neural baseline",
+        "a matched two-hidden-layer MLP regressor if the compact network underfits",
+        "retain a strong ridge or kernel baseline for calibration",
     ],
     "feature_or_target_bottleneck_likely": [
         "target audit and noise review",
