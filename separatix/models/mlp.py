@@ -167,10 +167,15 @@ def _balanced_accuracy_error(
     return float(error)
 
 
-def _simple_singlelabel_trigger(metrics: dict[str, Any], config: ProfilerConfig) -> dict[str, Any]:
+def _simple_singlelabel_trigger(
+    metrics: dict[str, Any], config: ProfilerConfig
+) -> dict[str, Any]:
     """Return trigger evidence for single-label MLP probes."""
     probes = metrics.get("probes", {})
-    counts = [int(value) for value in metrics.get("audit", {}).get("class_counts", {}).values()]
+    counts = [
+        int(value)
+        for value in metrics.get("audit", {}).get("class_counts", {}).values()
+    ]
     dummy = probes.get("dummy", {})
     if "balanced_accuracy" not in dummy:
         return {
@@ -229,7 +234,9 @@ def _simple_singlelabel_trigger(metrics: dict[str, Any], config: ProfilerConfig)
     }
 
 
-def _multilabel_metric_error(result: dict[str, Any], metric: str, n_samples: int) -> float:
+def _multilabel_metric_error(
+    result: dict[str, Any], metric: str, n_samples: int
+) -> float:
     """Return a conservative multilabel metric error estimate."""
     stability = result.get(f"stability_{metric}_std")
     if stability is not None:
@@ -238,7 +245,9 @@ def _multilabel_metric_error(result: dict[str, Any], metric: str, n_samples: int
     return float(math.sqrt(max(0.0, score * (1.0 - score)) / max(1, n_samples)))
 
 
-def _simple_multilabel_trigger(metrics: dict[str, Any], config: ProfilerConfig) -> dict[str, Any]:
+def _simple_multilabel_trigger(
+    metrics: dict[str, Any], config: ProfilerConfig
+) -> dict[str, Any]:
     """Return trigger evidence for multilabel MLP probes."""
     probes = metrics.get("probes", {})
     n_samples = int(metrics.get("audit", {}).get("n_samples", 1))
@@ -270,7 +279,9 @@ def _simple_multilabel_trigger(metrics: dict[str, Any], config: ProfilerConfig) 
                 best_lower = lower
         if best_skill is not None and best_skill >= config.mlp_trigger_skill_threshold:
             strong_metrics += 1
-        if best_lower is None or best_lower >= max(0.0, float(dummy_score) - dummy_error):
+        if best_lower is None or best_lower >= max(
+            0.0, float(dummy_score) - dummy_error
+        ):
             safe_third_metric += 1
         skill_table[metric] = {"best_probe": best_probe, "skill": best_skill}
     good_enough = strong_metrics >= 2 and safe_third_metric >= 3
@@ -287,7 +298,9 @@ def _simple_multilabel_trigger(metrics: dict[str, Any], config: ProfilerConfig) 
     }
 
 
-def _simple_regression_trigger(metrics: dict[str, Any], config: ProfilerConfig) -> dict[str, Any]:
+def _simple_regression_trigger(
+    metrics: dict[str, Any], config: ProfilerConfig
+) -> dict[str, Any]:
     """Return trigger evidence for regression MLP probes."""
     probes = metrics.get("probes", {})
     metric_names = ("r2_variance_weighted", "r2_uniform_average")
@@ -340,11 +353,17 @@ def _resolve_device(torch: Any, requested: str) -> tuple[str, str | None]:
             return "mps", None
         return "cpu", None
     if requested == "cuda" and not bool(torch.cuda.is_available()):
-        return "cpu", "CUDA was requested for MLP probes but is unavailable; falling back to CPU."
+        return (
+            "cpu",
+            "CUDA was requested for MLP probes but is unavailable; falling back to CPU.",
+        )
     if requested == "mps":
         mps = getattr(torch.backends, "mps", None)
         if mps is None or not bool(mps.is_available()):
-            return "cpu", "MPS was requested for MLP probes but is unavailable; falling back to CPU."
+            return (
+                "cpu",
+                "MPS was requested for MLP probes but is unavailable; falling back to CPU.",
+            )
     return requested, None
 
 
@@ -380,7 +399,9 @@ def _architecture_candidates(
     max_parameters: int,
 ) -> list[dict[str, Any]]:
     """Return the architecture ladder filtered to the available budget."""
-    compact_width = int(np.clip(_next_power_of_two(math.sqrt(max(1, input_dim * output_dim))), 16, 256))
+    compact_width = int(
+        np.clip(_next_power_of_two(math.sqrt(max(1, input_dim * output_dim))), 16, 256)
+    )
     wide_width = min(512, 4 * compact_width)
     one_compact = (compact_width,)
     one_wide = (wide_width,)
@@ -391,14 +412,24 @@ def _architecture_candidates(
     )
     two_wide_width = _two_layer_width_for_budget(input_dim, output_dim, one_wide_params)
     candidates: list[dict[str, Any]] = [
-        {"label": "one_layer_compact", "hidden_layer_sizes": one_compact, "tier": "compact", "depth": 1},
+        {
+            "label": "one_layer_compact",
+            "hidden_layer_sizes": one_compact,
+            "tier": "compact",
+            "depth": 1,
+        },
         {
             "label": "two_layer_compact",
             "hidden_layer_sizes": (two_compact_width, two_compact_width),
             "tier": "compact",
             "depth": 2,
         },
-        {"label": "one_layer_wide", "hidden_layer_sizes": one_wide, "tier": "wide", "depth": 1},
+        {
+            "label": "one_layer_wide",
+            "hidden_layer_sizes": one_wide,
+            "tier": "wide",
+            "depth": 1,
+        },
         {
             "label": "two_layer_wide",
             "hidden_layer_sizes": (two_wide_width, two_wide_width),
@@ -455,9 +486,10 @@ def _split_rows(
             if groups is not None
             else singlelabel_splitter.split(X, y_array)
         )
-        return [(np.asarray(train, dtype=int), np.asarray(test, dtype=int)) for train, test in split_iter], (
-            "group_cross_validation" if groups is not None else "cross_validation"
-        )
+        return [
+            (np.asarray(train, dtype=int), np.asarray(test, dtype=int))
+            for train, test in split_iter
+        ], ("group_cross_validation" if groups is not None else "cross_validation")
     if target_mode == "multilabel":
         y_dense = _dense_multilabel_matrix(y)
         cv, method = choose_multilabel_cv(
@@ -468,16 +500,21 @@ def _split_rows(
         )
         if cv is None:
             return None, "resubstitution_low_reliability"
-        split_y = y_dense.ravel() if y_dense.shape[1] == 1 and method == "binary_stratified" else y_dense
+        split_y = (
+            y_dense.ravel()
+            if y_dense.shape[1] == 1 and method == "binary_stratified"
+            else y_dense
+        )
         multilabel_splitter: Any = cv
         split_iter = (
             multilabel_splitter.split(X, split_y, groups)
             if groups is not None
             else multilabel_splitter.split(X, split_y)
         )
-        return [(np.asarray(train, dtype=int), np.asarray(test, dtype=int)) for train, test in split_iter], (
-            "group_cross_validation" if groups is not None else "cross_validation"
-        )
+        return [
+            (np.asarray(train, dtype=int), np.asarray(test, dtype=int))
+            for train, test in split_iter
+        ], ("group_cross_validation" if groups is not None else "cross_validation")
     y_array = np.asarray(y, dtype=float)
     cv, _ = choose_regression_cv(
         y_array,
@@ -493,9 +530,10 @@ def _split_rows(
         if groups is not None
         else regression_splitter.split(X, y_array)
     )
-    return [(np.asarray(train, dtype=int), np.asarray(test, dtype=int)) for train, test in split_iter], (
-        "group_cross_validation" if groups is not None else "cross_validation"
-    )
+    return [
+        (np.asarray(train, dtype=int), np.asarray(test, dtype=int))
+        for train, test in split_iter
+    ], ("group_cross_validation" if groups is not None else "cross_validation")
 
 
 def _singlelabel_validation_indices(
@@ -514,7 +552,9 @@ def _singlelabel_validation_indices(
         del torch
         from sklearn.model_selection import GroupShuffleSplit
 
-        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=random_state)
+        splitter = GroupShuffleSplit(
+            n_splits=1, test_size=0.2, random_state=random_state
+        )
         return next(splitter.split(np.zeros((n_rows, 1)), y, groups))
     min_count = int(np.min(np.bincount(y)))
     if min_count >= 2:
@@ -551,8 +591,10 @@ def _multilabel_validation_indices(
         split_at = max(1, int(math.floor(0.8 * n_rows)))
         return rows[:split_at], rows[split_at:]
     split_y = Y.ravel() if Y.shape[1] == 1 and method == "binary_stratified" else Y
-    split_iter = holdout.split(np.zeros((n_rows, 1)), split_y, groups) if groups is not None else holdout.split(
-        np.zeros((n_rows, 1)), split_y
+    split_iter = (
+        holdout.split(np.zeros((n_rows, 1)), split_y, groups)
+        if groups is not None
+        else holdout.split(np.zeros((n_rows, 1)), split_y)
     )
     train_idx, valid_idx = next(split_iter)
     return np.asarray(train_idx, dtype=int), np.asarray(valid_idx, dtype=int)
@@ -571,7 +613,9 @@ def _regression_validation_indices(
     if groups is not None and np.unique(groups).shape[0] >= 2:
         from sklearn.model_selection import GroupShuffleSplit
 
-        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=random_state)
+        splitter = GroupShuffleSplit(
+            n_splits=1, test_size=0.2, random_state=random_state
+        )
         return next(splitter.split(np.zeros((n_rows, 1)), rows, groups))
     from sklearn.model_selection import ShuffleSplit
 
@@ -653,7 +697,9 @@ class _TorchMLPBase(BaseEstimator):
             output_dim = int(y_array.shape[1])
             fit_idx, valid_idx = _multilabel_validation_indices(
                 y_array,
-                config=ProfilerConfig(multilabel_stratification=self.multilabel_stratification),
+                config=ProfilerConfig(
+                    multilabel_stratification=self.multilabel_stratification
+                ),
                 groups=groups,
             )
         else:
@@ -668,8 +714,12 @@ class _TorchMLPBase(BaseEstimator):
             )
 
         self.x_scaler_ = StandardScaler().fit(X_array[fit_idx])
-        X_fit = self.x_scaler_.transform(X_array[fit_idx]).astype(np.float32, copy=False)
-        X_valid = self.x_scaler_.transform(X_array[valid_idx]).astype(np.float32, copy=False)
+        X_fit = self.x_scaler_.transform(X_array[fit_idx]).astype(
+            np.float32, copy=False
+        )
+        X_valid = self.x_scaler_.transform(X_array[valid_idx]).astype(
+            np.float32, copy=False
+        )
         if self.task == "regression":
             self.y_mean_ = np.mean(y_array[fit_idx], axis=0, keepdims=True)
             self.y_scale_ = np.std(y_array[fit_idx], axis=0, keepdims=True)
@@ -710,7 +760,9 @@ class _TorchMLPBase(BaseEstimator):
             negative = y_fit.shape[0] - positive
             pos_weight = np.clip(negative / np.maximum(positive, 1.0), 0.05, 20.0)
             loss_fn = torch.nn.BCEWithLogitsLoss(
-                pos_weight=torch.tensor(pos_weight, dtype=torch.float32, device=self.device)
+                pos_weight=torch.tensor(
+                    pos_weight, dtype=torch.float32, device=self.device
+                )
             )
         else:
             loss_fn = torch.nn.MSELoss()
@@ -722,7 +774,9 @@ class _TorchMLPBase(BaseEstimator):
             y_valid_tensor = torch.tensor(y_valid, dtype=torch.long, device=self.device)
         else:
             y_fit_tensor = torch.tensor(y_fit, dtype=torch.float32, device=self.device)
-            y_valid_tensor = torch.tensor(y_valid, dtype=torch.float32, device=self.device)
+            y_valid_tensor = torch.tensor(
+                y_valid, dtype=torch.float32, device=self.device
+            )
 
         best_state = None
         best_loss = float("inf")
@@ -754,7 +808,9 @@ class _TorchMLPBase(BaseEstimator):
                 continue
             model.eval()
             with torch.no_grad():
-                valid_loss = float(loss_fn(model(X_valid_tensor), y_valid_tensor).item())
+                valid_loss = float(
+                    loss_fn(model(X_valid_tensor), y_valid_tensor).item()
+                )
             if valid_loss + 1e-6 < best_loss:
                 best_loss = valid_loss
                 best_state = {
@@ -771,7 +827,9 @@ class _TorchMLPBase(BaseEstimator):
         self.model_ = model
         self.training_summary_ = {
             "epochs_trained": int(epochs_trained),
-            "best_validation_loss": None if best_loss == float("inf") else float(best_loss),
+            "best_validation_loss": None
+            if best_loss == float("inf")
+            else float(best_loss),
             "used_validation_split": bool(X_valid.shape[0] > 0),
         }
         return self
@@ -788,7 +846,9 @@ class _TorchMLPBase(BaseEstimator):
         with torch.no_grad():
             prediction = self._predict_tensor(torch, self.model_(tensor))
         if self.task == "regression":
-            values = np.asarray(prediction, dtype=np.float32) * self.y_scale_ + self.y_mean_
+            values = (
+                np.asarray(prediction, dtype=np.float32) * self.y_scale_ + self.y_mean_
+            )
             return values
         return prediction
 
@@ -844,7 +904,9 @@ def _evaluate_singlelabel_models(
                     y[train_idx],
                     groups=None if groups is None else groups[train_idx],
                 )
-                predictions[test_idx] = np.asarray(fitted.predict(_slice_rows(X, test_idx)), dtype=int)
+                predictions[test_idx] = np.asarray(
+                    fitted.predict(_slice_rows(X, test_idx)), dtype=int
+                )
                 if isinstance(fitted, _TorchMLPBase):
                     training_summaries.append(dict(fitted.training_summary_))
         summary = summarize_predictions(y, predictions, class_labels=class_labels)
@@ -977,15 +1039,21 @@ def _bootstrap_indices(
     rng = make_rng(random_state)
     if groups is None:
         return [
-            np.sort(rng.choice(np.arange(n_rows), size=n_rows, replace=True)).astype(int)
+            np.sort(rng.choice(np.arange(n_rows), size=n_rows, replace=True)).astype(
+                int
+            )
             for _ in range(repeats)
         ]
     unique_groups = np.unique(groups)
     group_rows = [np.flatnonzero(groups == group_id) for group_id in unique_groups]
     samples: list[np.ndarray] = []
     for _ in range(repeats):
-        chosen = rng.choice(np.arange(unique_groups.shape[0]), size=unique_groups.shape[0], replace=True)
-        sampled = np.concatenate([group_rows[int(index)] for index in chosen]).astype(int)
+        chosen = rng.choice(
+            np.arange(unique_groups.shape[0]), size=unique_groups.shape[0], replace=True
+        )
+        sampled = np.concatenate([group_rows[int(index)] for index in chosen]).astype(
+            int
+        )
         samples.append(np.sort(sampled))
     return samples
 
@@ -1137,19 +1205,25 @@ def _singlelabel_override_evidence(
             "required_comparators_complete": False,
         }
     pairwise: dict[str, Any] = {}
-    required_complete = all(name in comparator_results for name in ("linear", "smooth_poly", "knn"))
+    required_complete = all(
+        name in comparator_results for name in ("linear", "smooth_poly", "knn")
+    )
     best_predictions = np.asarray(best_result["predictions"], dtype=int)
     for name, result in comparator_results.items():
         if "predictions" not in result:
             continue
         comparator_predictions = np.asarray(result["predictions"], dtype=int)
-        def delta(sample_idx: np.ndarray, second: np.ndarray = comparator_predictions) -> float:
+
+        def delta(
+            sample_idx: np.ndarray, second: np.ndarray = comparator_predictions
+        ) -> float:
             return _balanced_accuracy_delta(
                 y_true,
                 best_predictions,
                 second,
                 sample_idx,
             )
+
         comparison = _bootstrap_comparison(
             delta,
             repeats=_mlp_budget(config)["bootstrap_repeats"],
@@ -1171,7 +1245,9 @@ def _singlelabel_override_evidence(
         and absolute_skill >= config.mlp_trigger_skill_threshold
         and required_complete
         and pairwise
-        and all(item["clear_advantage"] for item in pairwise.values() if item is not None)
+        and all(
+            item["clear_advantage"] for item in pairwise.values() if item is not None
+        )
     )
     return {
         "status": "completed",
@@ -1202,7 +1278,9 @@ def _multilabel_override_evidence(
 ) -> dict[str, Any]:
     """Return multilabel MLP recommendation evidence."""
     metric_names = ("micro_f1", "macro_f1", "sample_jaccard")
-    best_name, best_result = _select_best_architecture(mlp_results, metrics=metric_names)
+    best_name, best_result = _select_best_architecture(
+        mlp_results, metrics=metric_names
+    )
     if best_name is None or best_result is None:
         return {
             "status": "completed",
@@ -1213,7 +1291,9 @@ def _multilabel_override_evidence(
             "required_comparators_complete": False,
         }
     pairwise: dict[str, Any] = {}
-    required_complete = all(name in comparator_results for name in ("linear", "smooth_poly", "knn"))
+    required_complete = all(
+        name in comparator_results for name in ("linear", "smooth_poly", "knn")
+    )
     best_predictions = np.asarray(best_result["predictions"], dtype=np.int8)
     for name, result in comparator_results.items():
         if "predictions" not in result:
@@ -1221,6 +1301,7 @@ def _multilabel_override_evidence(
         comparator_predictions = np.asarray(result["predictions"], dtype=np.int8)
         metric_comparisons: dict[str, Any] = {}
         for metric in metric_names:
+
             def delta(
                 sample_idx: np.ndarray,
                 metric_name: str = metric,
@@ -1234,6 +1315,7 @@ def _multilabel_override_evidence(
                     metric=metric_name,
                     label_names=label_names,
                 )
+
             comparison = _bootstrap_comparison(
                 delta,
                 repeats=_mlp_budget(config)["bootstrap_repeats"],
@@ -1258,7 +1340,10 @@ def _multilabel_override_evidence(
         and required_complete
         and pairwise
         and all(
-            sum(1 for metric in metric_names if metric_result[metric]["clear_advantage"]) >= 2
+            sum(
+                1 for metric in metric_names if metric_result[metric]["clear_advantage"]
+            )
+            >= 2
             for metric_result in pairwise.values()
         )
     )
@@ -1292,7 +1377,9 @@ def _regression_override_evidence(
 ) -> dict[str, Any]:
     """Return regression MLP recommendation evidence."""
     metric_names = ("r2_variance_weighted", "r2_uniform_average")
-    best_name, best_result = _select_best_architecture(mlp_results, metrics=metric_names)
+    best_name, best_result = _select_best_architecture(
+        mlp_results, metrics=metric_names
+    )
     if best_name is None or best_result is None:
         return {
             "status": "completed",
@@ -1303,7 +1390,9 @@ def _regression_override_evidence(
             "required_comparators_complete": False,
         }
     pairwise: dict[str, Any] = {}
-    required_complete = all(name in comparator_results for name in ("linear", "smooth_poly", "knn"))
+    required_complete = all(
+        name in comparator_results for name in ("linear", "smooth_poly", "knn")
+    )
     best_predictions = np.asarray(best_result["predictions"], dtype=float)
     for name, result in comparator_results.items():
         if "predictions" not in result:
@@ -1311,6 +1400,7 @@ def _regression_override_evidence(
         comparator_predictions = np.asarray(result["predictions"], dtype=float)
         metric_comparisons: dict[str, Any] = {}
         for metric in metric_names:
+
             def delta(
                 sample_idx: np.ndarray,
                 metric_name: str = metric,
@@ -1324,6 +1414,7 @@ def _regression_override_evidence(
                     metric=metric_name,
                     target_names=target_names,
                 )
+
             comparison = _bootstrap_comparison(
                 delta,
                 repeats=_mlp_budget(config)["bootstrap_repeats"],
@@ -1400,7 +1491,12 @@ def _append_runtime_warnings(
                 UserWarning,
             )
     if architectures:
-        estimated_work = 6.0 * max(architecture["parameter_count"] for architecture in architectures) * epochs * folds
+        estimated_work = (
+            6.0
+            * max(architecture["parameter_count"] for architecture in architectures)
+            * epochs
+            * folds
+        )
         if estimated_work >= _MLP_RUNTIME_WORK_WARNING:
             record_warning(
                 "Optional MLP probe work estimate is very large; results may take noticeably longer than simpler probes.",
@@ -1448,13 +1544,17 @@ def maybe_run_singlelabel_mlp_probes(
         "torch_available": True,
     }
     if fallback_warning is not None:
-        record_warning(fallback_warning, report_context.setdefault("warnings", []), UserWarning)
+        record_warning(
+            fallback_warning, report_context.setdefault("warnings", []), UserWarning
+        )
     budget = _mlp_budget(config)
     sample_config = replace(
         config,
         max_samples=min(
             budget["max_samples"],
-            config.max_samples if config.max_samples is not None else budget["max_samples"],
+            config.max_samples
+            if config.max_samples is not None
+            else budget["max_samples"],
         ),
     )
     X_used, y_used, sample_info = cap_samples_for_budget(
@@ -1470,7 +1570,9 @@ def maybe_run_singlelabel_mlp_probes(
         reason="mlp_probe",
         config=config,
         report_context=report_context,
-        groups=None if groups is None else groups[np.asarray(sample_info["indices"], dtype=int)],
+        groups=None
+        if groups is None
+        else groups[np.asarray(sample_info["indices"], dtype=int)],
     )
     if dense_info["skipped"]:
         payload["status"] = "skipped"
@@ -1487,7 +1589,9 @@ def maybe_run_singlelabel_mlp_probes(
     )
     if not architectures:
         payload["status"] = "skipped"
-        payload["reason"] = "No MLP architecture fit within the configured parameter budget."
+        payload["reason"] = (
+            "No MLP architecture fit within the configured parameter budget."
+        )
         payload["sample_info"] = sample_info
         return payload
     splits, evaluation_mode = _split_rows(
@@ -1511,11 +1615,16 @@ def maybe_run_singlelabel_mlp_probes(
         "dummy": DummyClassifier(strategy="prior"),
         "linear": _linear_classifier(dense_X),
         "knn": KNeighborsClassifier(
-            n_neighbors=min(max(1, dense_y.shape[0] - 1), min(15, max(3, int(np.sqrt(dense_y.shape[0])))))
+            n_neighbors=min(
+                max(1, dense_y.shape[0] - 1),
+                min(15, max(3, int(np.sqrt(dense_y.shape[0])))),
+            )
         ),
     }
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
-    estimated_expanded_mb = _estimate_dense_mb(dense_X.shape[0], expanded_features, dense_X.dtype)
+    estimated_expanded_mb = _estimate_dense_mb(
+        dense_X.shape[0], expanded_features, dense_X.dtype
+    )
     if expanded_features <= 50_000 and estimated_expanded_mb <= config.max_dense_mb:
         comparators["smooth_poly"] = _full_quadratic_classifier(config.random_state)
     else:
@@ -1645,13 +1754,17 @@ def maybe_run_multilabel_mlp_probes(
         "torch_available": True,
     }
     if fallback_warning is not None:
-        record_warning(fallback_warning, report_context.setdefault("warnings", []), UserWarning)
+        record_warning(
+            fallback_warning, report_context.setdefault("warnings", []), UserWarning
+        )
     budget = _mlp_budget(config)
     sample_config = replace(
         config,
         max_samples=min(
             budget["max_samples"],
-            config.max_samples if config.max_samples is not None else budget["max_samples"],
+            config.max_samples
+            if config.max_samples is not None
+            else budget["max_samples"],
         ),
     )
     X_used, Y_used, sample_info = cap_multilabel_samples_for_budget(
@@ -1661,7 +1774,11 @@ def maybe_run_multilabel_mlp_probes(
         reason="probe",
         groups=groups,
     )
-    groups_used = None if groups is None else groups[np.asarray(sample_info["indices"], dtype=int)]
+    groups_used = (
+        None
+        if groups is None
+        else groups[np.asarray(sample_info["indices"], dtype=int)]
+    )
     dense_info = _ensure_dense_X_for_multilabel(
         X_used,
         Y_used,
@@ -1685,7 +1802,9 @@ def maybe_run_multilabel_mlp_probes(
     )
     if not architectures:
         payload["status"] = "skipped"
-        payload["reason"] = "No MLP architecture fit within the configured parameter budget."
+        payload["reason"] = (
+            "No MLP architecture fit within the configured parameter budget."
+        )
         payload["sample_info"] = sample_info
         return payload
     splits, evaluation_mode = _split_rows(
@@ -1709,11 +1828,16 @@ def maybe_run_multilabel_mlp_probes(
         "dummy": MultilabelPriorDummy(threshold=0.5),
         "linear": _multilabel_linear_classifier(dense_X, config),
         "knn": KNeighborsClassifier(
-            n_neighbors=min(max(1, dense_Y.shape[0] - 1), min(15, max(3, int(np.sqrt(dense_Y.shape[0])))))
+            n_neighbors=min(
+                max(1, dense_Y.shape[0] - 1),
+                min(15, max(3, int(np.sqrt(dense_Y.shape[0])))),
+            )
         ),
     }
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
-    estimated_expanded_mb = _estimate_dense_mb(dense_X.shape[0], expanded_features, dense_X.dtype)
+    estimated_expanded_mb = _estimate_dense_mb(
+        dense_X.shape[0], expanded_features, dense_X.dtype
+    )
     if expanded_features <= 50_000 and estimated_expanded_mb <= config.max_dense_mb:
         comparators["smooth_poly"] = _full_multilabel_quadratic_classifier(config)
     else:
@@ -1847,13 +1971,17 @@ def maybe_run_regression_mlp_probes(
         "torch_available": True,
     }
     if fallback_warning is not None:
-        record_warning(fallback_warning, report_context.setdefault("warnings", []), UserWarning)
+        record_warning(
+            fallback_warning, report_context.setdefault("warnings", []), UserWarning
+        )
     budget = _mlp_budget(config)
     sample_config = replace(
         config,
         max_samples=min(
             budget["max_samples"],
-            config.max_samples if config.max_samples is not None else budget["max_samples"],
+            config.max_samples
+            if config.max_samples is not None
+            else budget["max_samples"],
         ),
     )
     X_used, Y_used, sample_info = cap_regression_samples_for_budget(
@@ -1863,7 +1991,11 @@ def maybe_run_regression_mlp_probes(
         reason="probe",
         groups=groups,
     )
-    groups_used = None if groups is None else groups[np.asarray(sample_info["indices"], dtype=int)]
+    groups_used = (
+        None
+        if groups is None
+        else groups[np.asarray(sample_info["indices"], dtype=int)]
+    )
     dense_info = ensure_dense_or_sample_regression(
         X_used,
         Y_used,
@@ -1889,7 +2021,9 @@ def maybe_run_regression_mlp_probes(
     )
     if not architectures:
         payload["status"] = "skipped"
-        payload["reason"] = "No MLP architecture fit within the configured parameter budget."
+        payload["reason"] = (
+            "No MLP architecture fit within the configured parameter budget."
+        )
         payload["sample_info"] = sample_info
         return payload
     splits, evaluation_mode = _split_rows(
@@ -1913,11 +2047,16 @@ def maybe_run_regression_mlp_probes(
         "dummy": TargetMeanDummyRegressor(),
         "linear": Ridge(alpha=1.0, random_state=config.random_state),
         "knn": KNeighborsRegressor(
-            n_neighbors=min(max(1, dense_Y.shape[0] - 1), min(15, max(3, int(np.sqrt(dense_Y.shape[0])))))
+            n_neighbors=min(
+                max(1, dense_Y.shape[0] - 1),
+                min(15, max(3, int(np.sqrt(dense_Y.shape[0])))),
+            )
         ),
     }
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
-    estimated_expanded_mb = _estimate_dense_mb(dense_X.shape[0], expanded_features, dense_X.dtype)
+    estimated_expanded_mb = _estimate_dense_mb(
+        dense_X.shape[0], expanded_features, dense_X.dtype
+    )
     if expanded_features <= 50_000 and estimated_expanded_mb <= config.max_dense_mb:
         comparators["smooth_poly"] = _regression_smooth_estimator(config)
     else:
