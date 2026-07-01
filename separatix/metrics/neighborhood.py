@@ -9,9 +9,13 @@ from scipy import sparse
 from sklearn.neighbors import NearestNeighbors
 
 from separatix.config import ProfilerConfig
-from separatix.densify import ensure_dense_or_sample
+from separatix.densify import ensure_dense_or_sample, ensure_dense_or_sample_regression
 from separatix.models.probes import _ensure_dense_X_for_multilabel
-from separatix.sampling import cap_multilabel_samples_for_budget, cap_samples_for_budget
+from separatix.sampling import (
+    cap_multilabel_samples_for_budget,
+    cap_regression_samples_for_budget,
+    cap_samples_for_budget,
+)
 
 
 def _slice_rows(X: Any, indices: np.ndarray) -> Any:
@@ -37,6 +41,35 @@ def _fit_neighbors(
         dense_info = ensure_dense_or_sample(
             X_used,
             y_like,
+            reason=reason,
+            config=config,
+            report_context=report_context,
+            groups=groups,
+        )
+        if dense_info["skipped"]:
+            return None, None
+        return dense_info["X"], dense_info.get("groups")
+
+
+def _fit_regression_neighbors(
+    X_used: Any,
+    Y_used: np.ndarray,
+    *,
+    reason: str,
+    config: ProfilerConfig,
+    report_context: dict[str, Any],
+    groups: np.ndarray | None = None,
+) -> tuple[Any, np.ndarray | None]:
+    """Return a neighbor-fit matrix for regression diagnostics."""
+    if not sparse.issparse(X_used):
+        return X_used, groups
+    try:
+        NearestNeighbors(n_neighbors=2).fit(X_used)
+        return X_used, groups
+    except TypeError:
+        dense_info = ensure_dense_or_sample_regression(
+            X_used,
+            Y_used,
             reason=reason,
             config=config,
             report_context=report_context,
@@ -182,6 +215,122 @@ def compute_neighborhood_diagnostics(
     cross_group = _singlelabel_summary(
         X_fit,
         y_used,
+        groups=dense_groups,
+        cross_group=True,
+    )
+    return {
+        **cross_group,
+        "cross_group": cross_group,
+        "row_level": row_level,
+        "sampling": sample_info,
+        "row_indices": sample_indices.tolist(),
+        "primary_scope": "cross_group",
+    }
+
+
+def _regression_summary(
+    X_fit: Any,
+    Y_used: np.ndarray,
+    *,
+    groups: np.ndarray | None,
+    cross_group: bool,
+) -> dict[str, Any]:
+    """Compute local target smoothness for regression diagnostics."""
+    n_samples = Y_used.shape[0]
+    k = min(n_samples - 1, min(15, max(3, int(np.sqrt(n_samples)))))
+    if k < 1:
+        return {
+            "mean_neighbor_target_distance": 0.0,
+            "target_smoothness_score": 1.0,
+            "high_discontinuity_fraction": 0.0,
+            "local_target_distance": [],
+        }
+    n_query = n_samples if cross_group and groups is not None else k + 1
+    nn = NearestNeighbors(n_neighbors=n_query)
+    nn.fit(X_fit)
+    _, indices = nn.kneighbors(X_fit, n_neighbors=n_query, return_distance=True)
+    centered = Y_used - np.mean(Y_used, axis=0)
+    global_distances = np.linalg.norm(centered, axis=1)
+    global_scale = float(np.sqrt(np.mean(global_distances**2)))
+    global_scale = max(global_scale, 1e-12)
+    local_distances: list[float] = []
+    for row_i in range(n_samples):
+        neigh = indices[row_i]
+        mask = neigh != row_i
+        if cross_group and groups is not None:
+            mask &= groups[neigh] != groups[row_i]
+        neigh = neigh[mask][:k]
+        if neigh.size == 0:
+            continue
+        target_delta = Y_used[neigh] - Y_used[row_i]
+        local_distances.append(float(np.mean(np.linalg.norm(target_delta, axis=1))))
+    if not local_distances:
+        return {
+            "mean_neighbor_target_distance": None,
+            "target_smoothness_score": None,
+            "high_discontinuity_fraction": None,
+            "local_target_distance": [],
+            "warning": "No cross-group neighbors were available.",
+        }
+    distances = np.asarray(local_distances, dtype=float)
+    normalized = distances / global_scale
+    return {
+        "mean_neighbor_target_distance": float(np.mean(distances)),
+        "mean_normalized_neighbor_target_distance": float(np.mean(normalized)),
+        "target_smoothness_score": float(1.0 / (1.0 + np.mean(normalized))),
+        "high_discontinuity_fraction": float(np.mean(normalized >= 1.0)),
+        "local_target_distance": local_distances,
+    }
+
+
+def compute_regression_neighborhood_diagnostics(
+    X: Any,
+    Y: np.ndarray,
+    *,
+    config: ProfilerConfig,
+    report_context: dict[str, Any],
+    groups: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Compute local target smoothness diagnostics for regression."""
+    X_used, Y_used, sample_info = cap_regression_samples_for_budget(
+        X,
+        Y,
+        config=config,
+        reason="neighbors",
+        groups=groups,
+    )
+    sample_indices = np.asarray(sample_info["indices"], dtype=int)
+    groups_used = groups[sample_indices] if groups is not None else None
+    X_fit, dense_groups = _fit_regression_neighbors(
+        X_used,
+        Y_used,
+        reason="regression_neighborhood_diagnostics",
+        config=config,
+        report_context=report_context,
+        groups=groups_used,
+    )
+    if X_fit is None:
+        return {
+            "sampling": sample_info,
+            "row_indices": sample_indices.tolist(),
+            "skipped_reason": "dense conversion unavailable",
+        }
+    row_level = _regression_summary(
+        X_fit,
+        np.asarray(Y_used, dtype=float),
+        groups=dense_groups,
+        cross_group=False,
+    )
+    if dense_groups is None:
+        return {
+            **row_level,
+            "sampling": sample_info,
+            "row_indices": sample_indices.tolist(),
+            "primary_scope": "row_level",
+        }
+    cross_group = _regression_summary(
+        X_fit,
+        np.asarray(Y_used, dtype=float),
         groups=dense_groups,
         cross_group=True,
     )

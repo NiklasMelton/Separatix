@@ -9,7 +9,11 @@ import numpy as np
 from scipy import sparse
 
 from separatix.config import ProfilerConfig
-from separatix.metrics.audit import compute_dataset_audit, compute_multilabel_audit
+from separatix.metrics.audit import (
+    compute_dataset_audit,
+    compute_multilabel_audit,
+    compute_regression_audit,
+)
 from separatix.metrics.baseline import summarize_probe_family
 from separatix.metrics.boundary import (
     compute_boundary_candidates,
@@ -23,18 +27,25 @@ from separatix.metrics.graph import (
 from separatix.metrics.neighborhood import (
     compute_multilabel_neighborhood_diagnostics,
     compute_neighborhood_diagnostics,
+    compute_regression_neighborhood_diagnostics,
 )
 from separatix.metrics.topology import (
     compute_multilabel_topology_diagnostics,
     compute_topology_diagnostics,
 )
-from separatix.models.probes import run_model_probes, run_multilabel_model_probes
+from separatix.models.probes import (
+    run_model_probes,
+    run_multilabel_model_probes,
+    run_regression_model_probes,
+)
 from separatix.preprocessing import build_preprocessing_summary
 from separatix.recommendation.engine import (
     compute_multilabel_scores,
+    compute_regression_scores,
     compute_scores,
     make_multilabel_recommendation,
     make_recommendation,
+    make_regression_recommendation,
 )
 from separatix.recommendation.text import render_recommendation
 from separatix.report import DiagnosticReport
@@ -42,6 +53,7 @@ from separatix.validation import (
     is_multilabel_indicator,
     validate_inputs,
     validate_multilabel_inputs,
+    validate_regression_inputs,
 )
 
 
@@ -51,7 +63,9 @@ class ComplexityProfiler:
     def __init__(
         self,
         *,
-        target_mode: Literal["auto", "singlelabel", "multilabel"] = "auto",
+        target_mode: Literal[
+            "auto", "singlelabel", "multilabel", "regression"
+        ] = "auto",
         multilabel_stratification: Literal["auto", "iterative", "heuristic"] = "auto",
         budget: Literal["fast", "standard", "extended"] = "standard",
         topology: Literal["off", "auto", "graph", "persistent"] = "auto",
@@ -83,6 +97,8 @@ class ComplexityProfiler:
 
     def fit(self, X: Any, y: Any, *, groups: Any = None) -> ComplexityProfiler:
         """Run diagnostics and store the resulting report in report_."""
+        if self.config.target_mode == "regression":
+            return self._fit_regression(X, y, groups=groups)
         if self.config.target_mode == "multilabel":
             return self._fit_multilabel(X, y, groups=groups)
         if self.config.target_mode == "auto":
@@ -205,6 +221,137 @@ class ComplexityProfiler:
             },
             densification_events=report_context["densification_events"],
             class_summary=class_summary,
+            grouping=validated.grouping_summary,
+            runtime={"total_seconds": float(time.perf_counter() - start)},
+            config=self.config.to_dict(),
+        )
+        report.recommendation_text = render_recommendation(report)
+        self.report_ = report
+        return self
+
+    def _fit_regression(
+        self, X: Any, y: Any, *, groups: Any = None
+    ) -> ComplexityProfiler:
+        """Run regression diagnostics and store the resulting report."""
+        start = time.perf_counter()
+        validated = validate_regression_inputs(X, y, groups=groups)
+        report_context: dict[str, Any] = {
+            "warnings": list(validated.warnings),
+            "skipped_diagnostics": [],
+            "densification_events": [],
+        }
+        skipped_target_indices = np.flatnonzero(~validated.usable_target_mask)
+        if skipped_target_indices.size:
+            report_context["skipped_diagnostics"].append(
+                {
+                    "name": "constant_regression_targets",
+                    "reason": (
+                        "Some regression targets were constant and excluded from "
+                        "probe-family scoring."
+                    ),
+                    "count": int(skipped_target_indices.size),
+                    "targets": [
+                        str(validated.target_names[idx])
+                        for idx in skipped_target_indices[:20]
+                    ],
+                }
+            )
+
+        Y_usable = validated.Y[:, validated.usable_target_mask]
+        target_names = validated.target_names[validated.usable_target_mask]
+        audit = compute_regression_audit(validated)
+        geometry = compute_geometry_diagnostics(
+            validated.X,
+            np.arange(validated.n_samples),
+            config=self.config,
+            report_context=report_context,
+            groups=validated.groups,
+        )
+        probes = run_regression_model_probes(
+            validated.X,
+            Y_usable,
+            config=self.config,
+            report_context=report_context,
+            target_names=target_names,
+            groups=validated.groups,
+        )
+        neighborhood = compute_regression_neighborhood_diagnostics(
+            validated.X,
+            Y_usable,
+            config=self.config,
+            report_context=report_context,
+            groups=validated.groups,
+        )
+        skipped_common = {
+            "skipped_reason": (
+                "Classification boundary and topology diagnostics are not used "
+                "for continuous regression targets."
+            )
+        }
+        report_context["skipped_diagnostics"].extend(
+            [
+                {
+                    "name": "regression_boundary_candidates",
+                    "reason": skipped_common["skipped_reason"],
+                },
+                {
+                    "name": "regression_graph_fragmentation",
+                    "reason": skipped_common["skipped_reason"],
+                },
+                {
+                    "name": "regression_topology",
+                    "reason": skipped_common["skipped_reason"],
+                },
+            ]
+        )
+        metrics = {
+            "audit": audit,
+            "geometry": geometry,
+            "probes": probes,
+            "baseline": self._regression_baseline_summary(probes),
+            "neighborhood": neighborhood,
+            "boundary": skipped_common,
+            "graph": skipped_common,
+            "topology": skipped_common,
+        }
+        scores = compute_regression_scores(
+            metrics,
+            skipped_count=len(report_context["skipped_diagnostics"]),
+            warning_count=len(report_context["warnings"]),
+        )
+        recommendation, confidence, decision_path, interpretations = (
+            make_regression_recommendation(scores, metrics)
+        )
+        target_summary = {
+            "target_type": "regression",
+            "n_targets": validated.n_targets,
+            "target_names": validated.target_names.tolist(),
+            "usable_target_names": target_names.tolist(),
+            "constant_target_count": int(np.sum(~validated.usable_target_mask)),
+            "target_variance_summary": audit["target_variance_summary"],
+        }
+        report = DiagnosticReport(
+            recommendation=recommendation,
+            recommendation_text="",
+            confidence=confidence,
+            metrics=metrics,
+            scores=scores,
+            interpretations=interpretations,
+            decision_path=decision_path,
+            warnings=report_context["warnings"],
+            errors=[],
+            skipped_diagnostics=report_context["skipped_diagnostics"],
+            preprocessing=build_preprocessing_summary(
+                validated.X,
+                is_sparse=validated.is_sparse_X,
+            ),
+            sampling={
+                "probe": probes["linear"].get("sample_info"),
+                "neighbors": neighborhood.get("sampling"),
+                "boundary": None,
+            },
+            densification_events=report_context["densification_events"],
+            class_summary=target_summary,
             grouping=validated.grouping_summary,
             runtime={"total_seconds": float(time.perf_counter() - start)},
             config=self.config.to_dict(),
@@ -358,6 +505,32 @@ class ComplexityProfiler:
     ) -> dict[str, Any]:
         """Return compact best-probe summaries for multilabel primary metrics."""
         primary = ("micro_f1", "macro_f1", "sample_jaccard")
+        summary: dict[str, Any] = {
+            "primary_metrics": list(primary),
+            "best_by_metric": {},
+        }
+        for metric in primary:
+            candidates = [
+                (name, result[metric])
+                for name, result in probes.items()
+                if metric in result and name != "dummy"
+            ]
+            if not candidates:
+                summary["best_by_metric"][metric] = None
+            else:
+                name, score = max(candidates, key=lambda item: item[1])
+                summary["best_by_metric"][metric] = {
+                    "probe": name,
+                    "score": float(score),
+                }
+        return summary
+
+    @staticmethod
+    def _regression_baseline_summary(
+        probes: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return compact best-probe summaries for regression primary metrics."""
+        primary = ("r2_variance_weighted", "r2_uniform_average")
         summary: dict[str, Any] = {
             "primary_metrics": list(primary),
             "best_by_metric": {},

@@ -10,28 +10,34 @@ import numpy as np
 from scipy import sparse
 from sklearn.dummy import DummyClassifier
 from sklearn.kernel_approximation import PolynomialCountSketch, RBFSampler
-from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.linear_model import LogisticRegression, Ridge, SGDClassifier
 from sklearn.multiclass import OneVsRestClassifier
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
 from separatix.config import ProfilerConfig
 from separatix.constants import BUDGETS
-from separatix.densify import ensure_dense_or_sample
+from separatix.densify import ensure_dense_or_sample, ensure_dense_or_sample_regression
 from separatix.models.scoring import (
     MultilabelPriorDummy,
+    TargetMeanDummyRegressor,
     choose_cv,
+    choose_regression_cv,
     evaluate_estimator,
     evaluate_multilabel_estimator,
+    evaluate_regression_estimator,
     summarize_multilabel_predictions,
     summarize_multilabel_stability,
     summarize_predictions,
+    summarize_regression_predictions,
+    summarize_regression_stability,
     summarize_stability,
 )
 from separatix.sampling import (
     BudgetConfig,
     cap_multilabel_samples_for_budget,
+    cap_regression_samples_for_budget,
     cap_samples_for_budget,
     choose_multilabel_cv,
     multilabel_subsample_indices,
@@ -534,6 +540,282 @@ def run_model_probes(
         results["kernel_approx"] = {
             "skipped_reason": "kernel probe disabled for this budget",
             "model_name": "RBFSampler+SGDClassifier",
+            "sample_info": sample_info,
+        }
+    return results
+
+
+def _regression_smooth_estimator(
+    config: ProfilerConfig,
+    *,
+    low_rank_components: int | None = None,
+) -> Pipeline:
+    """Return a smooth nonlinear regression probe."""
+    if low_rank_components is None:
+        return Pipeline(
+            [
+                (
+                    "poly",
+                    PolynomialFeatures(
+                        degree=_QUADRATIC_DEGREE, include_bias=False
+                    ),
+                ),
+                ("scale", StandardScaler()),
+                ("reg", Ridge(alpha=1.0, random_state=config.random_state)),
+            ]
+        )
+    return Pipeline(
+        [
+            ("scale_in", StandardScaler()),
+            (
+                "poly_sketch",
+                PolynomialCountSketch(
+                    degree=_QUADRATIC_DEGREE,
+                    coef0=1.0,
+                    n_components=low_rank_components,
+                    random_state=config.random_state,
+                ),
+            ),
+            ("scale_out", StandardScaler()),
+            ("reg", Ridge(alpha=1.0, random_state=config.random_state)),
+        ]
+    )
+
+
+def _record_regression_probe(
+    estimator: Any,
+    X: Any,
+    Y: np.ndarray,
+    *,
+    name: str,
+    model_name: str,
+    config: ProfilerConfig,
+    budget: BudgetConfig,
+    sample_info: dict[str, Any],
+    target_names: np.ndarray,
+    groups: np.ndarray | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    """Evaluate and summarize one regression probe."""
+    cv, cv_method = choose_regression_cv(
+        Y,
+        budget["cv_folds"],
+        groups=groups,
+        random_state=config.random_state,
+    )
+    start = time.perf_counter()
+    preds, evaluation_mode = evaluate_regression_estimator(
+        estimator,
+        X,
+        Y,
+        cv=cv,
+        groups=groups,
+    )
+    metrics = summarize_regression_predictions(Y, preds, target_names=target_names)
+    metrics.update(
+        summarize_regression_stability(
+            estimator,
+            X,
+            Y,
+            repeats=budget["bootstrap_repeats"],
+            random_state=config.random_state,
+            target_names=target_names,
+            groups=groups,
+        )
+    )
+    metrics.update(
+        {
+            "model_name": model_name,
+            "probe_name": name,
+            "runtime_seconds": float(time.perf_counter() - start),
+            "sample_info": sample_info,
+            "evaluation_mode": evaluation_mode,
+            "cv_method": cv_method,
+            "predictions": np.asarray(preds).tolist(),
+        }
+    )
+    if extra:
+        metrics.update(extra)
+    return metrics
+
+
+def run_regression_model_probes(
+    X: Any,
+    Y: np.ndarray,
+    *,
+    config: ProfilerConfig,
+    report_context: dict[str, Any],
+    target_names: np.ndarray,
+    groups: np.ndarray | None = None,
+) -> dict[str, dict[str, object]]:
+    """Run lightweight baseline and probe regressors."""
+    budget = cast(BudgetConfig, BUDGETS[config.budget])
+    X_used, Y_used, sample_info = cap_regression_samples_for_budget(
+        X, Y, config=config, reason="probe", groups=groups
+    )
+    groups_used = (
+        groups[np.asarray(sample_info["indices"], dtype=int)]
+        if groups is not None
+        else None
+    )
+    n_neighbors = min(
+        max(1, Y_used.shape[0] - 1),
+        min(15, max(3, int(np.sqrt(Y_used.shape[0])))),
+    )
+    probes: dict[str, Any] = {
+        "dummy": TargetMeanDummyRegressor(),
+        "linear": Ridge(alpha=1.0, random_state=config.random_state),
+        "knn": KNeighborsRegressor(n_neighbors=n_neighbors),
+    }
+    results: dict[str, dict[str, object]] = {}
+    for name, estimator in probes.items():
+        results[name] = _record_regression_probe(
+            estimator,
+            X_used,
+            Y_used,
+            name=name,
+            model_name=estimator.__class__.__name__,
+            config=config,
+            budget=budget,
+            sample_info=sample_info,
+            target_names=target_names,
+            groups=groups_used,
+        )
+
+    smooth_info = ensure_dense_or_sample_regression(
+        X_used,
+        Y_used,
+        reason="regression_smooth_nonlinear_probe",
+        config=config,
+        report_context=report_context,
+        groups=groups_used,
+    )
+    if smooth_info["skipped"]:
+        results["smooth_poly"] = {
+            "skipped_reason": "dense conversion unavailable under current policy",
+            "model_name": "PolynomialFeatures+Ridge",
+            "sample_info": sample_info,
+        }
+    else:
+        dense_X = np.asarray(smooth_info["X"])
+        dense_Y = np.asarray(smooth_info["y"], dtype=float)
+        dense_groups = smooth_info.get("groups")
+        dtype = dense_X.dtype if dense_X.dtype is not None else np.dtype(float)
+        expanded_features = _quadratic_feature_count(dense_X.shape[1])
+        estimated_expanded_mb = _estimate_dense_mb(
+            dense_X.shape[0], expanded_features, dtype
+        )
+        metadata = _smooth_probe_metadata(dense_X, sample_info)
+        if (
+            expanded_features <= _MAX_FULL_QUADRATIC_FEATURES
+            and estimated_expanded_mb <= config.max_dense_mb
+        ):
+            estimator = _regression_smooth_estimator(config)
+            results["smooth_poly"] = _record_regression_probe(
+                estimator,
+                dense_X,
+                dense_Y,
+                name="smooth_poly",
+                model_name="PolynomialFeatures+Ridge",
+                config=config,
+                budget=budget,
+                sample_info=sample_info,
+                target_names=target_names,
+                groups=dense_groups,
+                extra={**metadata, "probe_variant": "full_quadratic"},
+            )
+        else:
+            sketch_components = _choose_sketch_components(
+                dense_X.shape[0],
+                dense_X.shape[1],
+                dtype,
+                max_dense_mb=config.max_dense_mb,
+            )
+            if sketch_components is None:
+                report_context.setdefault("skipped_diagnostics", []).append(
+                    {
+                        "name": "regression_smooth_nonlinear_probe",
+                        "reason": _SMOOTH_PROBE_SKIP_REASON,
+                    }
+                )
+                results["smooth_poly"] = {
+                    **metadata,
+                    "skipped_reason": _SMOOTH_PROBE_SKIP_REASON,
+                    "model_name": "PolynomialCountSketch+Ridge",
+                }
+            else:
+                estimator = _regression_smooth_estimator(
+                    config, low_rank_components=sketch_components
+                )
+                results["smooth_poly"] = _record_regression_probe(
+                    estimator,
+                    dense_X,
+                    dense_Y,
+                    name="smooth_poly",
+                    model_name="PolynomialCountSketch+Ridge",
+                    config=config,
+                    budget=budget,
+                    sample_info=sample_info,
+                    target_names=target_names,
+                    groups=dense_groups,
+                    extra={
+                        **metadata,
+                        "probe_variant": "low_rank_quadratic",
+                        "sketch_n_components": int(sketch_components),
+                        "estimated_sketch_mb": _estimate_dense_mb(
+                            dense_X.shape[0], sketch_components, dtype
+                        ),
+                    },
+                )
+
+    if budget["run_kernel_probe"]:
+        dense_info = ensure_dense_or_sample_regression(
+            X_used,
+            Y_used,
+            reason="regression_kernel_approximation_probe",
+            config=config,
+            report_context=report_context,
+            groups=groups_used,
+        )
+        if dense_info["skipped"]:
+            results["kernel_approx"] = {
+                "skipped_reason": "dense conversion unavailable under current policy",
+                "model_name": "RBFSampler+Ridge",
+                "sample_info": sample_info,
+            }
+        else:
+            estimator = Pipeline(
+                [
+                    (
+                        "rff",
+                        RBFSampler(
+                            gamma=1.0 / max(1, dense_info["X"].shape[1]),
+                            n_components=min(
+                                256, max(32, dense_info["X"].shape[1] * 2)
+                            ),
+                            random_state=config.random_state,
+                        ),
+                    ),
+                    ("scale", StandardScaler()),
+                    ("reg", Ridge(alpha=1.0, random_state=config.random_state)),
+                ]
+            )
+            results["kernel_approx"] = _record_regression_probe(
+                estimator,
+                np.asarray(dense_info["X"]),
+                np.asarray(dense_info["y"], dtype=float),
+                name="kernel_approx",
+                model_name="RBFSampler+Ridge",
+                config=config,
+                budget=budget,
+                sample_info=sample_info,
+                target_names=target_names,
+                groups=dense_info.get("groups"),
+            )
+    else:
+        results["kernel_approx"] = {
+            "skipped_reason": "kernel probe disabled for this budget",
+            "model_name": "RBFSampler+Ridge",
             "sample_info": sample_info,
         }
     return results

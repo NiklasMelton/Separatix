@@ -59,6 +59,24 @@ class ValidatedMultilabelInput:
     grouping_summary: dict[str, Any]
 
 
+@dataclass
+class ValidatedRegressionInput:
+    """Validated representation of a regression diagnostic input."""
+
+    X: Any
+    Y: np.ndarray
+    target_names: np.ndarray
+    is_sparse_X: bool
+    n_samples: int
+    n_features: int
+    n_targets: int
+    target_variance: np.ndarray
+    usable_target_mask: np.ndarray
+    warnings: list[str]
+    groups: np.ndarray | None
+    grouping_summary: dict[str, Any]
+
+
 def _coerce_pandas(X: Any) -> Any:
     """Convert pandas containers to their underlying arrays when available."""
     if hasattr(X, "to_numpy"):
@@ -72,6 +90,17 @@ def _label_names(y: Any, n_labels: int) -> np.ndarray:
     if columns is not None and len(columns) == n_labels:
         return np.asarray([str(item) for item in columns], dtype=object)
     return np.asarray([f"label_{idx}" for idx in range(n_labels)], dtype=object)
+
+
+def _target_names(y: Any, n_targets: int) -> np.ndarray:
+    """Return regression target names, preserving pandas column names."""
+    name = getattr(y, "name", None)
+    if n_targets == 1 and name is not None:
+        return np.asarray([str(name)], dtype=object)
+    columns = getattr(y, "columns", None)
+    if columns is not None and len(columns) == n_targets:
+        return np.asarray([str(item) for item in columns], dtype=object)
+    return np.asarray([f"target_{idx}" for idx in range(n_targets)], dtype=object)
 
 
 def _dense_is_binary(values: np.ndarray) -> bool:
@@ -339,6 +368,68 @@ def validate_multilabel_inputs(
         label_prevalence=label_prevalence,
         usable_label_mask=usable_label_mask,
         all_zero_sample_count=int(np.sum(all_zero_rows)),
+        warnings=warnings,
+        groups=group_info.encoded if group_info else None,
+        grouping_summary=grouping_summary,
+    )
+
+
+def validate_regression_inputs(
+    X: Any, y: Any, *, groups: Any = None
+) -> ValidatedRegressionInput:
+    """Validate features and continuous targets for regression diagnostics."""
+    X_checked, is_sparse_X = _validate_feature_matrix(X)
+    if sparse.issparse(y):
+        y_raw = y.toarray()
+    else:
+        y_raw = _coerce_pandas(y)
+    try:
+        Y = np.asarray(y_raw)
+    except ValueError as exc:
+        raise ValueError("regression y must be a rectangular numeric array.") from exc
+    if Y.ndim == 1:
+        Y = Y.reshape(-1, 1)
+    if Y.ndim != 2:
+        raise ValueError("regression y must be one- or two-dimensional.")
+    if X_checked.shape[0] != Y.shape[0]:
+        raise ValueError("X and regression y must have matching sample counts.")
+    if not np.issubdtype(Y.dtype, np.number):
+        try:
+            Y = Y.astype(float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("regression y must be numeric.") from exc
+    else:
+        Y = Y.astype(float, copy=False)
+    if not np.isfinite(Y).all():
+        raise ValueError("regression y contains non-finite values.")
+    if Y.shape[0] < 3:
+        raise ValueError("At least three samples are required for regression.")
+    if Y.shape[1] < 1:
+        raise ValueError("regression y must contain at least one target.")
+
+    variance = np.var(Y, axis=0)
+    usable_target_mask = variance > 1e-12
+    if not np.any(usable_target_mask):
+        raise ValueError("At least one non-constant regression target is required.")
+    warnings: list[str] = []
+    if not np.all(usable_target_mask):
+        warnings.append(
+            "Some regression targets are constant and will be excluded from "
+            "probe-family scoring."
+        )
+
+    group_info = validate_groups(groups, n_samples=int(X_checked.shape[0]))
+    grouping_summary = summarize_groups(group_info.encoded if group_info else None)
+    return ValidatedRegressionInput(
+        X=X_checked,
+        Y=Y,
+        target_names=_target_names(y, Y.shape[1]),
+        is_sparse_X=is_sparse_X,
+        n_samples=int(X_checked.shape[0]),
+        n_features=int(X_checked.shape[1]),
+        n_targets=int(Y.shape[1]),
+        target_variance=variance,
+        usable_target_mask=usable_target_mask,
         warnings=warnings,
         groups=group_info.encoded if group_info else None,
         grouping_summary=grouping_summary,

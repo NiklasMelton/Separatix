@@ -2,18 +2,18 @@
 
 # Separatix
 
-`separatix` profiles labeled feature spaces before classifier training and
-returns transparent, confidence-aware guidance about apparent classification
-complexity.
+`separatix` profiles labeled feature spaces before supervised model training
+and returns transparent, confidence-aware guidance about apparent classification
+or regression complexity.
 
 The intended use case includes learned embeddings, but the package is not
 restricted to embeddings. It also works on raw feature matrices when you want a
-coarse diagnostic of whether the observed class geometry looks mostly linear,
-smoothly nonlinear, local or kernel-like, fragmented, bottlenecked, or too
-unreliable to trust.
+coarse diagnostic of whether the observed supervised geometry looks mostly
+linear, smoothly nonlinear, local or kernel-like, fragmented or discontinuous,
+bottlenecked, or too unreliable to trust.
 
-`separatix` does not claim to pick the optimal classifier. It is a pretraining
-diagnostic and auditing tool designed to make its reasoning visible.
+`separatix` does not claim to pick the optimal classifier or regressor. It is a
+pretraining diagnostic and auditing tool designed to make its reasoning visible.
 
 ## Installation
 
@@ -56,9 +56,12 @@ print(report.to_json())
 - Binary and multiclass classification targets
 - Multilabel binary indicator targets with `target_mode="multilabel"` or
   auto-detection for unambiguous 2D indicators
+- Continuous single- or multi-target regression with explicit
+  `target_mode="regression"`
 - String or numeric labels treated as categorical class identifiers
 
-Regression and multioutput classification are not supported.
+Regression is opt-in so numeric class identifiers remain categorical by
+default. General multioutput classification is not supported.
 
 ## What It Returns
 
@@ -86,6 +89,12 @@ with:
 ```bash
 pip install "separatix[multilabel]"
 ```
+
+For regression targets, call `diagnose(X, y, target_mode="regression")`.
+Regression evidence is compared across variance-weighted R2 and uniform-average
+R2, with normalized RMSE and target-neighborhood smoothness as supporting
+diagnostics. Classification-only boundary, fragmentation, and topology
+diagnostics are reported as skipped for continuous targets.
 
 Optional persistent-topology diagnostics can be installed with:
 
