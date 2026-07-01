@@ -556,9 +556,7 @@ def _regression_smooth_estimator(
             [
                 (
                     "poly",
-                    PolynomialFeatures(
-                        degree=_QUADRATIC_DEGREE, include_bias=False
-                    ),
+                    PolynomialFeatures(degree=_QUADRATIC_DEGREE, include_bias=False),
                 ),
                 ("scale", StandardScaler()),
                 ("reg", Ridge(alpha=1.0, random_state=config.random_state)),

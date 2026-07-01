@@ -589,9 +589,7 @@ def summarize_regression_predictions(
         },
         "per_target_normalized_rmse_summary": {
             "min": float(np.min(per_target_nrmse)) if per_target_nrmse else None,
-            "median": float(np.median(per_target_nrmse))
-            if per_target_nrmse
-            else None,
+            "median": float(np.median(per_target_nrmse)) if per_target_nrmse else None,
             "max": float(np.max(per_target_nrmse)) if per_target_nrmse else None,
         },
     }

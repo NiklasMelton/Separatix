@@ -51,8 +51,7 @@ def test_multitarget_regression_reports_per_target_summary() -> None:
     assert report.class_summary["n_targets"] == 2
     assert report.metrics["audit"]["usable_target_count"] == 2
     assert (
-        report.metrics["probes"]["linear"]["per_target_r2_summary"]["min"]
-        is not None
+        report.metrics["probes"]["linear"]["per_target_r2_summary"]["min"] is not None
     )
 
 

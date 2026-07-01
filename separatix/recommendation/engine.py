@@ -1639,9 +1639,7 @@ def compute_regression_scores(
     weighted_dummy = family_metrics["dummy"]["r2_variance_weighted"]["score"]
     linear_weighted = family_metrics["linear"]["r2_variance_weighted"]["score"]
     return {
-        "signal_r2_variance_weighted": float(
-            max(0.0, weighted_best - weighted_dummy)
-        )
+        "signal_r2_variance_weighted": float(max(0.0, weighted_best - weighted_dummy))
         if weighted_best is not None and weighted_dummy is not None
         else None,
         "signal_r2_uniform_average": None
