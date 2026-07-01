@@ -23,6 +23,11 @@ def diagnose(
     max_samples: int | None = None,
     random_state: int | None = None,
     warn_on_densify: bool = True,
+    mlp_probes: bool = False,
+    mlp_device: Literal["cpu", "auto", "cuda", "mps"] = "cpu",
+    mlp_trigger_skill_threshold: float = 0.75,
+    mlp_min_improvement: float = 0.02,
+    mlp_max_parameters: int | None = None,
 ) -> str | DiagnosticReport:
     """Diagnose apparent supervised complexity from embeddings and targets."""
     profiler = ComplexityProfiler(
@@ -35,6 +40,11 @@ def diagnose(
         max_samples=max_samples,
         random_state=random_state,
         warn_on_densify=warn_on_densify,
+        mlp_probes=mlp_probes,
+        mlp_device=mlp_device,
+        mlp_trigger_skill_threshold=mlp_trigger_skill_threshold,
+        mlp_min_improvement=mlp_min_improvement,
+        mlp_max_parameters=mlp_max_parameters,
     )
     report = profiler.fit(X, y, groups=groups).report_
     if report is None:

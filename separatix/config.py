@@ -23,6 +23,11 @@ class ProfilerConfig:
     n_jobs: int | None = None
     target_mode: Literal["auto", "singlelabel", "multilabel", "regression"] = "auto"
     multilabel_stratification: Literal["auto", "iterative", "heuristic"] = "auto"
+    mlp_probes: bool = False
+    mlp_device: Literal["cpu", "auto", "cuda", "mps"] = "cpu"
+    mlp_trigger_skill_threshold: float = 0.75
+    mlp_min_improvement: float = 0.02
+    mlp_max_parameters: int | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration values."""
@@ -45,6 +50,14 @@ class ProfilerConfig:
             raise ValueError("max_samples must be positive when provided.")
         if self.min_dense_samples <= 0:
             raise ValueError("min_dense_samples must be positive.")
+        if self.mlp_device not in {"cpu", "auto", "cuda", "mps"}:
+            raise ValueError(f"Unsupported mlp device: {self.mlp_device!r}")
+        if not 0.0 <= self.mlp_trigger_skill_threshold <= 1.0:
+            raise ValueError("mlp_trigger_skill_threshold must lie in [0, 1].")
+        if not 0.0 <= self.mlp_min_improvement <= 1.0:
+            raise ValueError("mlp_min_improvement must lie in [0, 1].")
+        if self.mlp_max_parameters is not None and self.mlp_max_parameters <= 0:
+            raise ValueError("mlp_max_parameters must be positive when provided.")
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable configuration dictionary."""

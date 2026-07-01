@@ -11,6 +11,8 @@ import numpy as np
 from separatix.constants import (
     FEATURE_OR_LABEL_BOTTLENECK_LIKELY,
     FEATURE_OR_TARGET_BOTTLENECK_LIKELY,
+    FEEDFORWARD_MLP_RECOMMENDED,
+    FEEDFORWARD_MLP_REGRESSION_RECOMMENDED,
     HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED,
     HIGH_CAPACITY_OR_PARTITIONING_REGRESSION_RECOMMENDED,
     INCONCLUSIVE,
@@ -812,6 +814,28 @@ def _format_family_score(evidence: dict[str, Any], family: str) -> str:
     return f"{score:.3f} +/- {standard_error:.3f}"
 
 
+def _mlp_override_payload(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Return the optional MLP override payload."""
+    payload = metrics.get("mlp_recommendation_evidence", {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _mlp_override_active(metrics: dict[str, Any]) -> bool:
+    """Return whether the optional MLP should override simpler families."""
+    return bool(_mlp_override_payload(metrics).get("recommendation_override"))
+
+
+def _mlp_architecture_note(metrics: dict[str, Any]) -> str | None:
+    """Return a compact architecture note for the decision path."""
+    best = _mlp_override_payload(metrics).get("best_architecture")
+    if not isinstance(best, dict):
+        return None
+    probe_name = best.get("probe_name")
+    if probe_name is None:
+        return None
+    return f"Selected optional MLP architecture: {probe_name}."
+
+
 def make_recommendation(
     scores: dict[str, float | None], metrics: dict[str, Any]
 ) -> tuple[str, str, list[str], dict[str, str]]:
@@ -875,6 +899,19 @@ def make_recommendation(
                 "No predictive family satisfied the evidence-selection rule."
             )
 
+    if _mlp_override_active(metrics):
+        mlp_payload = _mlp_override_payload(metrics)
+        recommendation = FEEDFORWARD_MLP_RECOMMENDED
+        decision_path.append(
+            "Conditional MLP probes were only run because simpler probes did not "
+            "meet the configured absolute-skill threshold."
+        )
+        if mlp_payload.get("override_reason") is not None:
+            decision_path.append(str(mlp_payload["override_reason"]))
+        architecture_note = _mlp_architecture_note(metrics)
+        if architecture_note is not None:
+            decision_path.append(architecture_note)
+
     quality_flags = evidence.get("quality_flags", [])
     if quality_flags:
         flag_names = ", ".join(flag["name"] for flag in quality_flags)
@@ -907,6 +944,13 @@ def make_recommendation(
         "estimated standard error; selection uses conservative escalation from "
         "simpler to more complex families."
     )
+    if metrics.get("mlp_recommendation_evidence") is not None:
+        interpretations["mlp_recommendation_evidence"] = (
+            "Optional MLP probes run only after simpler models miss a configured "
+            "absolute-skill threshold, and they override the simpler-family "
+            "recommendation only when the best tested architecture clearly beats "
+            "every aligned simpler probe."
+        )
 
     decision_path.append(
         "Family evidence: "
@@ -1339,6 +1383,19 @@ def make_multilabel_recommendation(
                 "so no single model-family recommendation was forced."
             )
 
+    if _mlp_override_active(metrics):
+        mlp_payload = _mlp_override_payload(metrics)
+        recommendation = FEEDFORWARD_MLP_RECOMMENDED
+        decision_path.append(
+            "Conditional MLP probes were only run because simpler multilabel "
+            "probes did not meet the configured absolute-skill threshold."
+        )
+        if mlp_payload.get("override_reason") is not None:
+            decision_path.append(str(mlp_payload["override_reason"]))
+        architecture_note = _mlp_architecture_note(metrics)
+        if architecture_note is not None:
+            decision_path.append(architecture_note)
+
     if flags:
         decision_path.append(
             "Evidence quality flags: "
@@ -1368,6 +1425,13 @@ def make_multilabel_recommendation(
             "optional topology is non-blocking."
         ),
     }
+    if metrics.get("mlp_recommendation_evidence") is not None:
+        interpretations["mlp_recommendation_evidence"] = (
+            "Optional multilabel MLP probes run only after simpler models miss a "
+            "configured absolute-skill threshold, and they override simpler probe "
+            "families only when the best tested architecture clearly beats every "
+            "aligned simpler probe on at least two primary metrics."
+        )
     decision_path.append(
         "Signal metrics beating dummy: "
         + ", ".join(evidence["signal_metrics_beating_dummy"] or ["none"])
@@ -1752,6 +1816,19 @@ def make_regression_recommendation(
                 "Primary regression metrics disagreed across probe families, "
                 "so no model-family recommendation was forced."
             )
+
+    if _mlp_override_active(metrics):
+        mlp_payload = _mlp_override_payload(metrics)
+        recommendation = FEEDFORWARD_MLP_REGRESSION_RECOMMENDED
+        decision_path.append(
+            "Conditional MLP probes were only run because simpler regression "
+            "probes did not meet the configured absolute-skill threshold."
+        )
+        if mlp_payload.get("override_reason") is not None:
+            decision_path.append(str(mlp_payload["override_reason"]))
+        architecture_note = _mlp_architecture_note(metrics)
+        if architecture_note is not None:
+            decision_path.append(architecture_note)
     if flags:
         decision_path.append(
             "Evidence quality flags: "
@@ -1806,6 +1883,13 @@ def make_regression_recommendation(
             "Higher values mean essential regression evidence was available."
         ),
     }
+    if metrics.get("mlp_recommendation_evidence") is not None:
+        interpretations["mlp_recommendation_evidence"] = (
+            "Optional regression MLP probes run only after simpler models miss a "
+            "configured absolute-skill threshold, and they override simpler probe "
+            "families only when the best tested architecture clearly beats every "
+            "aligned simpler regressor on both primary R2 metrics."
+        )
     decision_path.append(
         "Signal metrics beating dummy: "
         + ", ".join(evidence["signal_metrics_beating_dummy"] or ["none"])
