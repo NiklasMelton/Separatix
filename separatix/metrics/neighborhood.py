@@ -244,6 +244,7 @@ def _regression_summary(
             "target_smoothness_score": 1.0,
             "high_discontinuity_fraction": 0.0,
             "local_target_distance": [],
+            "local_normalized_target_distance": [],
         }
     n_query = n_samples if cross_group and groups is not None else k + 1
     nn = NearestNeighbors(n_neighbors=n_query)
@@ -270,6 +271,7 @@ def _regression_summary(
             "target_smoothness_score": None,
             "high_discontinuity_fraction": None,
             "local_target_distance": [],
+            "local_normalized_target_distance": [],
             "warning": "No cross-group neighbors were available.",
         }
     distances = np.asarray(local_distances, dtype=float)
@@ -280,6 +282,7 @@ def _regression_summary(
         "target_smoothness_score": float(1.0 / (1.0 + np.mean(normalized))),
         "high_discontinuity_fraction": float(np.mean(normalized >= 1.0)),
         "local_target_distance": local_distances,
+        "local_normalized_target_distance": normalized.tolist(),
     }
 
 

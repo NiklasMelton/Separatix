@@ -1614,6 +1614,8 @@ def compute_regression_scores(
     flags = _regression_quality_flags(
         metrics, family_metrics, skipped_count, warning_count
     )
+    topology = metrics.get("topology", {})
+    topology_strength = _topology_score(metrics)
     evidence = {
         "selection_rule": (
             "Compare regression probe families across variance-weighted and "
@@ -1627,6 +1629,11 @@ def compute_regression_scores(
         "signal_metrics_beating_dummy": signal_metrics,
         "best_clearly_beats_dummy_on_primary_metrics": len(signal_metrics) >= 1,
         "family_comparisons": comparisons,
+        "topology_available": bool(
+            topology_strength is not None and topology.get("skipped_reason") is None
+        ),
+        "topology_strength": topology_strength,
+        "topology_role": "supporting_only",
         "quality_flags": flags,
         "quality_score": float(
             np.mean([flag.get("severity") != "blocking" for flag in flags])
@@ -1667,6 +1674,7 @@ def compute_regression_scores(
         "high_discontinuity_fraction": _numeric(
             metrics.get("neighborhood", {}).get("high_discontinuity_fraction")
         ),
+        "topology_score": topology_strength,
         "reliability_score": _numeric(evidence.get("quality_score")),
     }
 
@@ -1750,6 +1758,17 @@ def make_regression_recommendation(
             + ", ".join(str(flag["name"]) for flag in flags)
             + "."
         )
+    if evidence["topology_available"]:
+        decision_path.append(
+            "Hard-subset topology strength was "
+            f"{float(evidence['topology_strength']):.3f}; this is supporting "
+            "evidence only and did not alter the recommendation or confidence."
+        )
+    else:
+        decision_path.append(
+            "Hard-subset topology was unavailable or skipped; optional topology "
+            "did not alter the recommendation or confidence."
+        )
     confidence = (
         "low"
         if recommendation
@@ -1777,6 +1796,11 @@ def make_regression_recommendation(
         "target_smoothness": (
             "Higher values mean nearby samples in feature space have nearby "
             "continuous target values."
+        ),
+        "topology": (
+            "Higher values indicate fragmentation or loop-like geometry among "
+            "high-residual or high-discontinuity points. This evidence is "
+            "descriptive and does not select the recommendation."
         ),
         "reliability": (
             "Higher values mean essential regression evidence was available."

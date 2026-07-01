@@ -93,8 +93,8 @@ pip install "separatix[multilabel]"
 For regression targets, call `diagnose(X, y, target_mode="regression")`.
 Regression evidence is compared across variance-weighted R2 and uniform-average
 R2, with normalized RMSE and target-neighborhood smoothness as supporting
-diagnostics. Classification-only boundary, fragmentation, and topology
-diagnostics are reported as skipped for continuous targets.
+diagnostics. Classification-only boundary and fragmentation diagnostics are
+reported as skipped for continuous targets.
 
 Optional persistent-topology diagnostics can be installed with:
 
@@ -105,6 +105,15 @@ pip install "separatix[tda]"
 For multilabel targets, persistent topology is supporting evidence only. When
 enabled, it is computed on capped boundary-candidate subsets and a small capped
 set of high-support label-positive subsets.
+
+For regression targets, optional topology is computed only on capped
+high-residual and high-local-discontinuity subsets. `topology="graph"` uses a
+sparse-compatible mutual-nearest-neighbor component summary;
+`topology="persistent"` adds persistent homology when `ripser` is installed.
+`topology="auto"` skips topology under the fast budget and otherwise attempts
+both summaries. Regression topology is descriptive supporting evidence: it is
+shown in the score and decision path but never changes the recommendation label
+or confidence.
 
 ## Recommendation Categories
 

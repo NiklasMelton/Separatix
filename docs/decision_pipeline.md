@@ -30,9 +30,9 @@ The current implementation follows this sequence:
      candidates, graph fragmentation, optional topology
    - multilabel: probe models, neighborhood coherence, boundary candidates,
      graph fragmentation, optional topology
-   - regression: probe models and target-neighborhood smoothness; classification
-     boundary, graph-fragmentation, and topology diagnostics are reported as
-     skipped
+   - regression: probe models, target-neighborhood smoothness, and optional
+     hard-subset topology; classification boundary and graph-fragmentation
+     diagnostics are reported as skipped
 5. Build probe-family evidence and uncertainty estimates from the probe-model
    results.
 6. Convert the raw diagnostic outputs into a smaller set of normalized summary
@@ -50,7 +50,8 @@ recommendation path is anchored in `micro_f1`, `macro_f1`, and `sample_jaccard`,
 without collapsing those primary metrics into a weighted aggregate. For
 regression targets, the recommendation path is anchored in variance-weighted and
 uniform-average R2, with normalized RMSE and target-neighborhood smoothness as
-supporting diagnostics.
+supporting diagnostics. Optional regression topology is descriptive evidence
+only and cannot alter the recommendation or confidence.
 
 The profiler implementation that wires these stages together lives in
 [separatix/profiler.py](/Users/niklasmelton/code/Separatix/separatix/profiler.py),
@@ -292,14 +293,22 @@ Interpretation:
 
 ### Topology Score
 
-When persistent-topology diagnostics are available, `topology_score` summarizes
-whether there is evidence of nontrivial local structure.
+When topology diagnostics are available, `topology_score` summarizes whether
+there is evidence of nontrivial local structure. For regression, the diagnostic
+examines only points at or above the 75th percentile of normalized linear-probe
+residual norm or normalized local target discontinuity. It reports
+mutual-nearest-neighbor fragmentation and, when requested and available,
+persistent homology.
 
 Interpretation:
 
 - higher means topology contributed supporting evidence for more structured
   local geometry
 - missing means topology was unavailable or skipped
+
+Regression topology is intentionally non-prescriptive. Its score and object
+summaries appear in the report and decision path, but they are excluded from
+recommendation selection, confidence, and reliability calculations.
 
 ### Reliability Score
 

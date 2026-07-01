@@ -31,6 +31,7 @@ from separatix.metrics.neighborhood import (
 )
 from separatix.metrics.topology import (
     compute_multilabel_topology_diagnostics,
+    compute_regression_topology_diagnostics,
     compute_topology_diagnostics,
 )
 from separatix.models.probes import (
@@ -282,10 +283,23 @@ class ComplexityProfiler:
             report_context=report_context,
             groups=validated.groups,
         )
+        topology_context: dict[str, Any] = {
+            "warnings": [],
+            "skipped_diagnostics": [],
+            "densification_events": [],
+        }
+        topology = compute_regression_topology_diagnostics(
+            validated.X,
+            Y_usable,
+            probes,
+            neighborhood,
+            config=self.config,
+            report_context=topology_context,
+        )
         skipped_common = {
             "skipped_reason": (
-                "Classification boundary and topology diagnostics are not used "
-                "for continuous regression targets."
+                "Classification boundary diagnostics are not used for continuous "
+                "regression targets."
             )
         }
         report_context["skipped_diagnostics"].extend(
@@ -298,10 +312,6 @@ class ComplexityProfiler:
                     "name": "regression_graph_fragmentation",
                     "reason": skipped_common["skipped_reason"],
                 },
-                {
-                    "name": "regression_topology",
-                    "reason": skipped_common["skipped_reason"],
-                },
             ]
         )
         metrics = {
@@ -312,7 +322,7 @@ class ComplexityProfiler:
             "neighborhood": neighborhood,
             "boundary": skipped_common,
             "graph": skipped_common,
-            "topology": skipped_common,
+            "topology": topology,
         }
         scores = compute_regression_scores(
             metrics,
@@ -321,6 +331,13 @@ class ComplexityProfiler:
         )
         recommendation, confidence, decision_path, interpretations = (
             make_regression_recommendation(scores, metrics)
+        )
+        report_context["warnings"].extend(topology_context["warnings"])
+        report_context["skipped_diagnostics"].extend(
+            topology_context["skipped_diagnostics"]
+        )
+        report_context["densification_events"].extend(
+            topology_context["densification_events"]
         )
         target_summary = {
             "target_type": "regression",
@@ -349,6 +366,11 @@ class ComplexityProfiler:
                 "probe": probes["linear"].get("sample_info"),
                 "neighbors": neighborhood.get("sampling"),
                 "boundary": None,
+                "topology": [
+                    obj.get("sampling")
+                    for obj in topology.get("objects", [])
+                    if obj.get("sampling") is not None
+                ],
             },
             densification_events=report_context["densification_events"],
             class_summary=target_summary,

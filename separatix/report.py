@@ -15,6 +15,7 @@ _TERSE_PRUNED_KEYS = frozenset(
         "local_cardinality_std",
         "local_neighbor_hamming_distance",
         "local_neighbor_jaccard",
+        "local_normalized_target_distance",
         "local_target_distance",
         "local_label_entropy",
         "per_label_metrics",
