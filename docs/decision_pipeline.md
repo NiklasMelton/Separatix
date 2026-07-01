@@ -1,17 +1,20 @@
 # Decision Pipeline And Recommendation Logic
 
-This document explains how `separatix` turns a labeled feature matrix `X` and
-labels `y` into a recommendation. It is intentionally written as a methods note
+This document explains how `separatix` turns a feature matrix `X` and supervised
+targets `y` into a recommendation. It is intentionally written as a methods note
 for users who want to understand or justify the package's behavior.
 
 `separatix` is designed for transparency rather than hidden optimization. It
-does not claim to identify the best classifier. Instead, it summarizes whether
-the observed labeled geometry looks more compatible with simple linear models,
-smooth nonlinear models, local or kernel methods, more partitioned
-higher-capacity models, or whether the data appear bottlenecked or unreliable.
+does not claim to identify the best classifier or regressor. Instead, it
+summarizes whether the observed supervised geometry looks more compatible with
+simple linear models, smooth nonlinear models, local or kernel methods, more
+partitioned higher-capacity models, or whether the data appear bottlenecked or
+unreliable.
 
 The intended setting includes learned embeddings, but the same logic applies to
-raw tabular or vectorized features as long as the task is classification.
+raw tabular or vectorized features. Regression diagnostics are explicit opt-in
+with `target_mode="regression"` so numeric class identifiers remain categorical
+by default.
 
 ## High-Level Flow
 
@@ -19,7 +22,7 @@ The current implementation follows this sequence:
 
 1. Validate `X` and `y`, reject unsupported target structures, and encode class
    labels or multilabel indicators.
-2. Dispatch to either the single-label or multilabel diagnostic path.
+2. Dispatch to single-label, multilabel, or explicit regression diagnostics.
 3. Record dataset audit information such as class counts, imbalance, sparsity,
    number of classes, or multilabel support statistics.
 4. Compute diagnostic families:
@@ -27,6 +30,9 @@ The current implementation follows this sequence:
      candidates, graph fragmentation, optional topology
    - multilabel: probe models, neighborhood coherence, boundary candidates,
      graph fragmentation, optional topology
+   - regression: probe models, target-neighborhood smoothness, and optional
+     hard-subset topology; classification boundary and graph-fragmentation
+     diagnostics are reported as skipped
 5. Build probe-family evidence and uncertainty estimates from the probe-model
    results.
 6. Convert the raw diagnostic outputs into a smaller set of normalized summary
@@ -39,10 +45,13 @@ The current implementation follows this sequence:
    `DiagnosticReport`.
 
 For single-label targets, the recommendation path is anchored in balanced
-accuracy plus geometry-aware supporting diagnostics. For multilabel targets,
-the recommendation path is anchored in `micro_f1`, `macro_f1`, and
-`sample_jaccard`, without collapsing those primary metrics into a weighted
-aggregate.
+accuracy plus geometry-aware supporting diagnostics. For multilabel targets, the
+recommendation path is anchored in `micro_f1`, `macro_f1`, and `sample_jaccard`,
+without collapsing those primary metrics into a weighted aggregate. For
+regression targets, the recommendation path is anchored in variance-weighted and
+uniform-average R2, with normalized RMSE and target-neighborhood smoothness as
+supporting diagnostics. Optional regression topology is descriptive evidence
+only and cannot alter the recommendation or confidence.
 
 The profiler implementation that wires these stages together lives in
 [separatix/profiler.py](/Users/niklasmelton/code/Separatix/separatix/profiler.py),
@@ -54,13 +63,14 @@ and the final score aggregation and recommendation logic lives in
 The recommendation engine does not act on raw coordinates alone. It combines
 several different views of the labeled feature space.
 
-`separatix` now has two related but distinct recommendation paths:
+`separatix` now has three related but distinct recommendation paths:
 
 - a single-label path for binary and multiclass classification
 - a multilabel path for binary indicator targets
+- an explicit regression path for continuous single- or multi-target problems
 
-The public recommendation labels stay the same, but the evidence objects are
-tailored to the target structure.
+The evidence objects and recommendation labels are tailored to the target
+structure.
 
 ### Dataset Audit
 
@@ -283,14 +293,22 @@ Interpretation:
 
 ### Topology Score
 
-When persistent-topology diagnostics are available, `topology_score` summarizes
-whether there is evidence of nontrivial local structure.
+When topology diagnostics are available, `topology_score` summarizes whether
+there is evidence of nontrivial local structure. For regression, the diagnostic
+examines only points at or above the 75th percentile of normalized linear-probe
+residual norm or normalized local target discontinuity. It reports
+mutual-nearest-neighbor fragmentation and, when requested and available,
+persistent homology.
 
 Interpretation:
 
 - higher means topology contributed supporting evidence for more structured
   local geometry
 - missing means topology was unavailable or skipped
+
+Regression topology is intentionally non-prescriptive. Its score and object
+summaries appear in the report and decision path, but they are excluded from
+recommendation selection, confidence, and reliability calculations.
 
 ### Reliability Score
 

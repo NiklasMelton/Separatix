@@ -14,7 +14,7 @@ def diagnose(
     *,
     groups: Any = None,
     return_report: bool = False,
-    target_mode: Literal["auto", "singlelabel", "multilabel"] = "auto",
+    target_mode: Literal["auto", "singlelabel", "multilabel", "regression"] = "auto",
     multilabel_stratification: Literal["auto", "iterative", "heuristic"] = "auto",
     budget: Literal["fast", "standard", "extended"] = "standard",
     topology: Literal["off", "auto", "graph", "persistent"] = "auto",
@@ -24,7 +24,7 @@ def diagnose(
     random_state: int | None = None,
     warn_on_densify: bool = True,
 ) -> str | DiagnosticReport:
-    """Diagnose apparent classification complexity from embeddings and labels."""
+    """Diagnose apparent supervised complexity from embeddings and targets."""
     profiler = ComplexityProfiler(
         target_mode=target_mode,
         multilabel_stratification=multilabel_stratification,

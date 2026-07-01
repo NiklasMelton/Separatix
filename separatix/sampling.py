@@ -234,6 +234,70 @@ def cap_samples_for_budget(
     )
 
 
+def random_subsample_indices(
+    n_total: int,
+    *,
+    n_samples: int,
+    random_state: int | None = None,
+) -> np.ndarray:
+    """Return deterministic random row indices without label stratification."""
+    if n_samples >= n_total:
+        return np.arange(n_total, dtype=int)
+    rng = make_rng(random_state)
+    return np.sort(rng.choice(np.arange(n_total), size=n_samples, replace=False))
+
+
+def cap_regression_samples_for_budget(
+    X: Any,
+    Y: np.ndarray,
+    *,
+    config: ProfilerConfig,
+    reason: str,
+    groups: np.ndarray | None = None,
+) -> tuple[Any, np.ndarray, dict[str, Any]]:
+    """Optionally cap regression sample count for expensive diagnostics."""
+    budget = cast(BudgetConfig, BUDGETS[config.budget])
+    if reason == "neighbors":
+        max_allowed = budget["max_neighbor_samples"]
+    elif reason == "boundary":
+        max_allowed = budget["max_boundary_samples"]
+    else:
+        max_allowed = budget["max_probe_samples"]
+    if config.max_samples is not None:
+        max_allowed = min(max_allowed, config.max_samples)
+    if Y.shape[0] <= max_allowed:
+        return (
+            X,
+            Y,
+            {
+                "reason": reason,
+                "sampled": False,
+                "n_original": int(Y.shape[0]),
+                "n_used": int(Y.shape[0]),
+                "indices": list(range(int(Y.shape[0]))),
+                "group_sampling": bool(groups is not None),
+            },
+        )
+    indices = random_subsample_indices(
+        Y.shape[0],
+        n_samples=max_allowed,
+        random_state=config.random_state,
+    )
+    X_used = X[indices] if not sparse.issparse(X) else X[indices, :]
+    return (
+        X_used,
+        Y[indices],
+        {
+            "reason": reason,
+            "sampled": True,
+            "n_original": int(Y.shape[0]),
+            "n_used": int(indices.shape[0]),
+            "indices": indices.tolist(),
+            "group_sampling": bool(groups is not None),
+        },
+    )
+
+
 def _dense_multilabel_matrix(Y: Any) -> np.ndarray:
     """Return a dense multilabel indicator matrix."""
     if sparse.issparse(Y):
