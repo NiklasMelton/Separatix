@@ -1,19 +1,19 @@
 [![separatix logo](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_logo.png)](https://github.com/NiklasMelton/Separatix)
 
-# separatix
+# Separatix
 
-`separatix` profiles labeled feature spaces before classifier training and
-returns transparent, confidence-aware guidance about apparent classification
-complexity.
+`separatix` profiles labeled feature spaces before supervised model training
+and returns transparent, confidence-aware guidance about apparent classification
+or regression complexity.
 
 The intended use case includes learned embeddings, but the package is not
 restricted to embeddings. It also works on raw feature matrices when you want a
-coarse diagnostic of whether the observed class geometry looks mostly linear,
-smoothly nonlinear, local or kernel-like, fragmented, bottlenecked, or too
-unreliable to trust.
+coarse diagnostic of whether the observed supervised geometry looks mostly
+linear, smoothly nonlinear, local or kernel-like, fragmented or discontinuous,
+bottlenecked, or too unreliable to trust.
 
-`separatix` does not claim to pick the optimal classifier. It is a pretraining
-diagnostic and auditing tool designed to make its reasoning visible.
+`separatix` does not claim to pick the optimal classifier or regressor. It is a
+pretraining diagnostic and auditing tool designed to make its reasoning visible.
 
 ## Installation
 
@@ -56,9 +56,12 @@ print(report.to_json())
 - Binary and multiclass classification targets
 - Multilabel binary indicator targets with `target_mode="multilabel"` or
   auto-detection for unambiguous 2D indicators
+- Continuous single- or multi-target regression with explicit
+  `target_mode="regression"`
 - String or numeric labels treated as categorical class identifiers
 
-Regression and multioutput classification are not supported.
+Regression is opt-in so numeric class identifiers remain categorical by
+default. General multioutput classification is not supported.
 
 ## What It Returns
 
@@ -87,6 +90,12 @@ with:
 pip install "separatix[multilabel]"
 ```
 
+For regression targets, call `diagnose(X, y, target_mode="regression")`.
+Regression evidence is compared across variance-weighted R2 and uniform-average
+R2, with normalized RMSE and target-neighborhood smoothness as supporting
+diagnostics. Classification-only boundary and fragmentation diagnostics are
+reported as skipped for continuous targets.
+
 Optional persistent-topology diagnostics can be installed with:
 
 ```bash
@@ -96,6 +105,15 @@ pip install "separatix[tda]"
 For multilabel targets, persistent topology is supporting evidence only. When
 enabled, it is computed on capped boundary-candidate subsets and a small capped
 set of high-support label-positive subsets.
+
+For regression targets, optional topology is computed only on capped
+high-residual and high-local-discontinuity subsets. `topology="graph"` uses a
+sparse-compatible mutual-nearest-neighbor component summary;
+`topology="persistent"` adds persistent homology when `ripser` is installed.
+`topology="auto"` skips topology under the fast budget and otherwise attempts
+both summaries. Regression topology is descriptive supporting evidence: it is
+shown in the score and decision path but never changes the recommendation label
+or confidence.
 
 ## Recommendation Categories
 

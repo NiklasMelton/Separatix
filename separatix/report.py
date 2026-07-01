@@ -15,11 +15,16 @@ _TERSE_PRUNED_KEYS = frozenset(
         "local_cardinality_std",
         "local_neighbor_hamming_distance",
         "local_neighbor_jaccard",
+        "local_normalized_target_distance",
+        "local_target_distance",
         "local_label_entropy",
         "per_label_metrics",
+        "per_target_metrics",
         "predictions",
         "strong_candidate_indices",
         "trigger_names_by_index",
+        "indices",
+        "row_indices",
     }
 )
 
@@ -55,6 +60,7 @@ class DiagnosticReport:
     sampling: dict[str, Any]
     densification_events: list[dict[str, Any]]
     class_summary: dict[str, Any]
+    grouping: dict[str, Any]
     runtime: dict[str, Any]
     config: dict[str, Any]
 

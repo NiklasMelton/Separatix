@@ -6,6 +6,9 @@ from typing import Any, cast
 
 import numpy as np
 from scipy import sparse
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
+from sklearn.neighbors import NearestNeighbors
 
 from separatix.config import ProfilerConfig
 from separatix.constants import BUDGETS
@@ -15,6 +18,7 @@ _MIN_TOPOLOGY_SAMPLES = 30
 _MAX_PERSISTENT_TOPOLOGY_SAMPLES = 2000
 _MAX_MULTILABEL_TOPOLOGY_LABELS = 5
 _MAX_REPORTED_SKIPPED_LABELS = 50
+_REGRESSION_HARD_SUBSET_QUANTILE = 0.75
 
 
 def _boundary_scale(X: np.ndarray) -> float:
@@ -126,6 +130,289 @@ def _summarize_persistent_topology(X_dense: np.ndarray) -> dict[str, Any]:
         if finite_h1.size and np.sum(finite_h1) > 0
         else 0.0,
     }
+
+
+def _summarize_topology_graph(X_subset: Any) -> dict[str, Any]:
+    """Summarize connected components in a mutual nearest-neighbor graph."""
+    n_samples = int(X_subset.shape[0])
+    if n_samples < 3:
+        return {"skipped_reason": "too few samples"}
+    k = min(n_samples - 1, min(10, max(3, int(np.sqrt(n_samples)))))
+    neighbors = NearestNeighbors(n_neighbors=k + 1)
+    neighbors.fit(X_subset)
+    indices = neighbors.kneighbors(X_subset, return_distance=False)
+    rows = np.repeat(np.arange(n_samples), k)
+    cols = indices[:, 1 : k + 1].reshape(-1)
+    directed = csr_matrix(
+        (np.ones(rows.shape[0], dtype=np.int8), (rows, cols)),
+        shape=(n_samples, n_samples),
+    )
+    graph = directed.minimum(directed.T)
+    n_components, labels = connected_components(graph, directed=False)
+    sizes = np.bincount(labels)
+    proportions = sizes / sizes.sum()
+    largest_fraction = float(np.max(proportions))
+    entropy = float(
+        -np.sum(proportions * np.log(proportions))
+        / max(np.log(max(2, n_components)), 1e-12)
+    )
+    component_count_scaled = min(1.0, n_components / max(3.0, n_samples / 20.0))
+    fragmentation = float(
+        np.clip(
+            np.mean([1.0 - largest_fraction, component_count_scaled, entropy]),
+            0.0,
+            1.0,
+        )
+    )
+    return {
+        "graph_rule": f"mutual_{k}_nearest_neighbors",
+        "component_count": int(n_components),
+        "largest_component_fraction": largest_fraction,
+        "component_size_entropy": entropy,
+        "small_component_count": int(np.sum(sizes <= 3)),
+        "graph_fragmentation_score": fragmentation,
+        "fragmentation_formula": (
+            "mean(1 - largest_component_fraction, scaled_component_count, "
+            "component_size_entropy)"
+        ),
+    }
+
+
+def _hard_subset_indices(
+    row_indices: np.ndarray,
+    values: np.ndarray,
+) -> tuple[np.ndarray, float | None]:
+    """Select finite rows at or above the hard-subset quantile."""
+    if row_indices.shape[0] != values.shape[0]:
+        return np.array([], dtype=int), None
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        return np.array([], dtype=int), None
+    threshold = float(np.quantile(values[finite], _REGRESSION_HARD_SUBSET_QUANTILE))
+    if threshold <= 1e-12:
+        return np.array([], dtype=int), threshold
+    return row_indices[finite & (values >= threshold)], threshold
+
+
+def _regression_residual_candidates(
+    Y: np.ndarray,
+    probes: dict[str, Any],
+) -> tuple[np.ndarray, float | None, str | None]:
+    """Return high normalized-residual row indices from the linear probe."""
+    linear = probes.get("linear", {})
+    predictions = linear.get("predictions")
+    sample_info = linear.get("sample_info", {})
+    row_indices = np.asarray(sample_info.get("indices", []), dtype=int)
+    if predictions is None or row_indices.size == 0:
+        return np.array([], dtype=int), None, "linear probe predictions unavailable"
+    predicted = np.asarray(predictions, dtype=float)
+    observed = np.asarray(Y[row_indices], dtype=float)
+    if predicted.shape != observed.shape:
+        return np.array([], dtype=int), None, "linear probe predictions were misaligned"
+    target_scale = np.std(observed, axis=0)
+    target_scale = np.where(target_scale > 1e-12, target_scale, 1.0)
+    residual_norm = np.linalg.norm((observed - predicted) / target_scale, axis=1)
+    selected, threshold = _hard_subset_indices(row_indices, residual_norm)
+    return selected, threshold, None
+
+
+def _regression_discontinuity_candidates(
+    neighborhood: dict[str, Any],
+) -> tuple[np.ndarray, float | None, str | None]:
+    """Return high normalized-discontinuity row indices."""
+    row_level = neighborhood.get("row_level", neighborhood)
+    values = np.asarray(
+        row_level.get("local_normalized_target_distance", []), dtype=float
+    )
+    row_indices = np.asarray(neighborhood.get("row_indices", []), dtype=int)
+    if values.size == 0 or row_indices.size == 0:
+        return np.array([], dtype=int), None, "local discontinuity values unavailable"
+    selected, threshold = _hard_subset_indices(row_indices, values)
+    if threshold is None:
+        return selected, threshold, "local discontinuity values were misaligned"
+    return selected, threshold, None
+
+
+def _regression_topology_object(
+    X: Any,
+    indices: np.ndarray,
+    *,
+    object_type: str,
+    source: str,
+    selection_rule: str,
+    threshold: float | None,
+    persistent_requested: bool,
+    persistent_available: bool,
+    config: ProfilerConfig,
+    report_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute graph and optional persistent topology for one hard subset."""
+    result: dict[str, Any] = {
+        "object_type": object_type,
+        "source": source,
+        "selection_rule": selection_rule,
+        "selection_threshold": threshold,
+        "candidate_count": int(indices.shape[0]),
+    }
+    if indices.shape[0] < _MIN_TOPOLOGY_SAMPLES:
+        result.update(
+            {
+                "sample_size": int(indices.shape[0]),
+                "skipped_reason": "too few hard-subset samples",
+            }
+        )
+        return result
+
+    used_indices, sampling = _sample_indices(
+        indices,
+        n_samples=_topology_sample_cap(config),
+        random_state=config.random_state,
+    )
+    if used_indices.shape[0] < _MIN_TOPOLOGY_SAMPLES:
+        result.update(
+            {
+                "sample_size": int(used_indices.shape[0]),
+                "sampling": sampling,
+                "skipped_reason": "topology sample cap is below the minimum",
+            }
+        )
+        return result
+    X_subset = _slice_rows(X, used_indices)
+    graph = _summarize_topology_graph(X_subset)
+    graph_strength = float(graph.get("graph_fragmentation_score", 0.0))
+    result.update(
+        {
+            "sample_size": int(used_indices.shape[0]),
+            "sampling": sampling,
+            "graph": graph,
+            "interpretation": (
+                "Higher strength indicates fragmented or loop-like geometry within "
+                "a subset already identified as difficult by regression evidence."
+            ),
+        }
+    )
+
+    persistent: dict[str, Any]
+    persistent_strength = 0.0
+    if not persistent_requested:
+        persistent = {"skipped_reason": "persistent topology not requested"}
+    elif not persistent_available:
+        persistent = {"skipped_reason": "ripser is not installed"}
+    else:
+        persistent = _compute_topology_object(
+            X_subset,
+            reason=f"regression_topology_{object_type}",
+            config=config,
+            report_context=report_context,
+            sampling=sampling,
+        )
+        persistent_strength = float(persistent.get("topology_strength", 0.0))
+    result["persistent"] = persistent
+    result["topology_strength"] = max(graph_strength, persistent_strength)
+    return result
+
+
+def compute_regression_topology_diagnostics(
+    X: Any,
+    Y: np.ndarray,
+    probes: dict[str, Any],
+    neighborhood: dict[str, Any],
+    *,
+    config: ProfilerConfig,
+    report_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Run optional topology diagnostics on hard regression subsets."""
+    if config.topology == "off":
+        return {
+            "target_type": "regression",
+            "mode": "off",
+            "skipped_reason": "topology disabled",
+        }
+    if config.topology == "auto" and config.budget == "fast":
+        return {
+            "target_type": "regression",
+            "mode": "auto",
+            "skipped_reason": "topology disabled for this budget",
+        }
+
+    persistent_requested = config.topology in {"persistent", "auto"}
+    persistent_available = False
+    if persistent_requested:
+        try:
+            from ripser import ripser as _ripser  # noqa: F401
+
+            persistent_available = True
+        except ImportError:
+            report_context.setdefault("skipped_diagnostics", []).append(
+                {
+                    "name": "regression_persistent_topology",
+                    "reason": "ripser is not installed",
+                }
+            )
+
+    residual_indices, residual_threshold, residual_error = (
+        _regression_residual_candidates(Y, probes)
+    )
+    discontinuity_indices, discontinuity_threshold, discontinuity_error = (
+        _regression_discontinuity_candidates(neighborhood)
+    )
+    specifications = [
+        (
+            "high_residual_points",
+            residual_indices,
+            residual_threshold,
+            residual_error,
+            "linear probe cross-validated normalized residual norm",
+            "normalized residual L2 norm >= 75th percentile",
+        ),
+        (
+            "high_discontinuity_points",
+            discontinuity_indices,
+            discontinuity_threshold,
+            discontinuity_error,
+            "row-level normalized neighbor target distance",
+            "normalized local target distance >= 75th percentile",
+        ),
+    ]
+    objects: list[dict[str, Any]] = []
+    strengths: list[float] = []
+    for object_type, indices, threshold, error, source, rule in specifications:
+        obj: dict[str, Any]
+        if error is not None:
+            obj = {
+                "object_type": object_type,
+                "source": source,
+                "selection_rule": rule,
+                "candidate_count": 0,
+                "skipped_reason": error,
+            }
+        else:
+            obj = _regression_topology_object(
+                X,
+                indices,
+                object_type=object_type,
+                source=source,
+                selection_rule=rule,
+                threshold=threshold,
+                persistent_requested=persistent_requested,
+                persistent_available=persistent_available,
+                config=config,
+                report_context=report_context,
+            )
+        objects.append(obj)
+        if "topology_strength" in obj:
+            strengths.append(float(obj["topology_strength"]))
+
+    result: dict[str, Any] = {
+        "target_type": "regression",
+        "mode": config.topology,
+        "objects": objects,
+        "topology_strength": float(max(strengths)) if strengths else None,
+        "recommendation_role": "supporting_only",
+    }
+    if not strengths:
+        result["skipped_reason"] = "no regression topology objects were computed"
+    return result
 
 
 def _compute_topology_object(

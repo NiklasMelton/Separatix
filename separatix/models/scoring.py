@@ -7,19 +7,28 @@ from typing import Any
 
 import numpy as np
 from scipy import sparse
-from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
     confusion_matrix,
     f1_score,
+    mean_squared_error,
     precision_score,
+    r2_score,
     recall_score,
 )
-from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+from sklearn.model_selection import (
+    GroupKFold,
+    GroupShuffleSplit,
+    KFold,
+    ShuffleSplit,
+    StratifiedKFold,
+    StratifiedShuffleSplit,
+)
 
 from separatix.config import ProfilerConfig
-from separatix.sampling import choose_multilabel_holdout
+from separatix.sampling import choose_multilabel_holdout, grouped_singlelabel_cv
 
 
 def _prepared_estimator(estimator: Any, train_size: int) -> Any:
@@ -31,19 +40,38 @@ def _prepared_estimator(estimator: Any, train_size: int) -> Any:
     return fitted
 
 
-def choose_cv(y: np.ndarray, max_folds: int) -> object | None:
+def choose_cv(
+    y: np.ndarray,
+    max_folds: int,
+    *,
+    groups: np.ndarray | None = None,
+    random_state: int | None = None,
+) -> tuple[object | None, str]:
     """Choose a stratified validation strategy based on class counts."""
+    if groups is not None:
+        return grouped_singlelabel_cv(
+            y,
+            groups,
+            max_folds=max_folds,
+            random_state=random_state,
+        )
     min_count = min(Counter(y).values())
     if min_count >= 5:
         n_splits = min(max_folds, 5)
-        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+        return StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=0
+        ), "stratified"
     if min_count >= 3:
         n_splits = min(max_folds, 3)
-        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+        return StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=0
+        ), "stratified"
     if min_count >= 2:
         n_splits = min(max_folds, 2)
-        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
-    return None
+        return StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=0
+        ), "stratified"
+    return None, "resubstitution_low_reliability"
 
 
 def evaluate_estimator(
@@ -52,6 +80,7 @@ def evaluate_estimator(
     y: np.ndarray,
     *,
     cv: Any | None,
+    groups: np.ndarray | None = None,
 ) -> tuple[np.ndarray, str]:
     """Return predictions with a partitioned CV path or a low-reliability fallback."""
     if cv is None:
@@ -59,12 +88,16 @@ def evaluate_estimator(
         return fitted.predict(X), "resubstitution_low_reliability"
 
     predictions = np.empty_like(y)
-    for train_idx, test_idx in cv.split(X, y):
+    split_iter = cv.split(X, y, groups) if groups is not None else cv.split(X, y)
+    for train_idx, test_idx in split_iter:
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             X[train_idx], y[train_idx]
         )
         predictions[test_idx] = fitted.predict(X[test_idx])
-    return predictions, "cross_validation"
+    return (
+        predictions,
+        "group_cross_validation" if groups is not None else "cross_validation",
+    )
 
 
 def summarize_stability(
@@ -74,6 +107,7 @@ def summarize_stability(
     *,
     repeats: int,
     random_state: int | None,
+    groups: np.ndarray | None = None,
 ) -> dict[str, int | float | None]:
     """Estimate score stability using repeated stratified holdout splits."""
     if repeats <= 0 or len(np.unique(y)) < 2 or np.min(np.bincount(y)) < 2:
@@ -83,13 +117,26 @@ def summarize_stability(
             "stability_balanced_accuracy_std": None,
         }
 
-    splitter = StratifiedShuffleSplit(
-        n_splits=repeats,
-        test_size=0.25,
-        random_state=random_state,
+    splitter = (
+        GroupShuffleSplit(
+            n_splits=repeats,
+            test_size=0.25,
+            random_state=random_state,
+        )
+        if groups is not None
+        else StratifiedShuffleSplit(
+            n_splits=repeats,
+            test_size=0.25,
+            random_state=random_state,
+        )
     )
     scores: list[float] = []
-    for train_idx, test_idx in splitter.split(X, y):
+    split_iter = (
+        splitter.split(X, y, groups) if groups is not None else splitter.split(X, y)
+    )
+    for train_idx, test_idx in split_iter:
+        if np.unique(y[train_idx]).shape[0] < np.unique(y).shape[0]:
+            continue
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             X[train_idx], y[train_idx]
         )
@@ -194,6 +241,7 @@ def evaluate_multilabel_estimator(
     Y: Any,
     *,
     cv: Any | None,
+    groups: np.ndarray | None = None,
 ) -> tuple[np.ndarray, str]:
     """Return multilabel predictions with CV or a low-reliability fallback."""
     Y_dense = _dense_multilabel_matrix(Y)
@@ -205,14 +253,20 @@ def evaluate_multilabel_estimator(
         )
 
     predictions = np.zeros_like(Y_dense, dtype=np.int8)
-    for train_idx, test_idx in cv.split(X, Y_dense):
+    split_iter = (
+        cv.split(X, Y_dense, groups) if groups is not None else cv.split(X, Y_dense)
+    )
+    for train_idx, test_idx in split_iter:
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             _slice_rows(X, train_idx), Y_dense[train_idx]
         )
         predictions[test_idx] = _dense_multilabel_matrix(
             fitted.predict(_slice_rows(X, test_idx))
         )
-    return predictions, "cross_validation"
+    return (
+        predictions,
+        "group_cross_validation" if groups is not None else "cross_validation",
+    )
 
 
 def _per_label_metrics(
@@ -354,6 +408,7 @@ def summarize_multilabel_stability(
     random_state: int | None,
     config: ProfilerConfig,
     label_names: np.ndarray,
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Estimate multilabel metric stability with repeated holdout splits."""
     if repeats <= 0:
@@ -365,7 +420,12 @@ def summarize_multilabel_stability(
             "stability_sample_jaccard_std": None,
         }
 
-    holdout, method = choose_multilabel_holdout(Y, repeats=repeats, config=config)
+    holdout, method = choose_multilabel_holdout(
+        Y,
+        repeats=repeats,
+        config=config,
+        groups=groups,
+    )
     if holdout is None:
         return {
             "stability_repeats": 0,
@@ -381,7 +441,12 @@ def summarize_multilabel_stability(
         "macro_f1": [],
         "sample_jaccard": [],
     }
-    for train_idx, test_idx in holdout.split(X, Y_dense):
+    split_iter = (
+        holdout.split(X, Y_dense, groups)
+        if groups is not None
+        else holdout.split(X, Y_dense)
+    )
+    for train_idx, test_idx in split_iter:
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             _slice_rows(X, train_idx), Y_dense[train_idx]
         )
@@ -402,3 +467,222 @@ def summarize_multilabel_stability(
         result[f"stability_{metric}_mean"] = float(np.mean(values)) if values else None
         result[f"stability_{metric}_std"] = float(np.std(values)) if values else None
     return result
+
+
+def choose_regression_cv(
+    y: np.ndarray,
+    max_folds: int,
+    *,
+    groups: np.ndarray | None = None,
+    random_state: int | None = None,
+) -> tuple[object | None, str]:
+    """Choose a non-stratified validation strategy for regression probes."""
+    n_samples = int(np.asarray(y).shape[0])
+    if groups is not None:
+        unique_groups = np.unique(groups)
+        if unique_groups.shape[0] >= 2:
+            return (
+                GroupKFold(n_splits=min(max_folds, unique_groups.shape[0])),
+                "group_k_fold",
+            )
+        return None, "group_split_unavailable"
+    if n_samples >= 10:
+        return (
+            KFold(n_splits=min(max_folds, 5), shuffle=True, random_state=random_state),
+            "k_fold",
+        )
+    if n_samples >= 4:
+        return (
+            KFold(n_splits=2, shuffle=True, random_state=random_state),
+            "k_fold_low_sample",
+        )
+    return None, "resubstitution_low_reliability"
+
+
+def evaluate_regression_estimator(
+    estimator: Any,
+    X: Any,
+    Y: np.ndarray,
+    *,
+    cv: Any | None,
+    groups: np.ndarray | None = None,
+) -> tuple[np.ndarray, str]:
+    """Return regression predictions with CV or a low-reliability fallback."""
+    if cv is None:
+        fitted = _prepared_estimator(estimator, Y.shape[0]).fit(X, Y)
+        return np.asarray(fitted.predict(X)).reshape(Y.shape), (
+            "resubstitution_low_reliability"
+        )
+
+    predictions = np.zeros_like(Y, dtype=float)
+    split_iter = cv.split(X, Y, groups) if groups is not None else cv.split(X, Y)
+    for train_idx, test_idx in split_iter:
+        fitted = _prepared_estimator(estimator, len(train_idx)).fit(
+            _slice_rows(X, train_idx), Y[train_idx]
+        )
+        fold_pred = np.asarray(fitted.predict(_slice_rows(X, test_idx)))
+        predictions[test_idx] = fold_pred.reshape(Y[test_idx].shape)
+    return (
+        predictions,
+        "group_cross_validation" if groups is not None else "cross_validation",
+    )
+
+
+def summarize_regression_predictions(
+    Y_true: np.ndarray,
+    Y_pred: np.ndarray,
+    *,
+    target_names: np.ndarray,
+) -> dict[str, Any]:
+    """Summarize single- or multi-target regression predictions."""
+    true = np.asarray(Y_true, dtype=float)
+    pred = np.asarray(Y_pred, dtype=float).reshape(true.shape)
+    variances = np.var(true, axis=0)
+    usable = variances > 1e-12
+    per_target: list[dict[str, Any]] = []
+    per_target_r2: list[float] = []
+    per_target_nrmse: list[float] = []
+    for idx in range(true.shape[1]):
+        if not usable[idx] or true.shape[0] < 2:
+            r2_value = None
+            nrmse = None
+        else:
+            r2_value = float(r2_score(true[:, idx], pred[:, idx]))
+            rmse = float(np.sqrt(mean_squared_error(true[:, idx], pred[:, idx])))
+            nrmse = float(rmse / max(np.sqrt(variances[idx]), 1e-12))
+            per_target_r2.append(r2_value)
+            per_target_nrmse.append(nrmse)
+        per_target.append(
+            {
+                "target": str(target_names[idx]),
+                "variance": float(variances[idx]),
+                "r2": r2_value,
+                "normalized_rmse": nrmse,
+            }
+        )
+    if np.any(usable) and true.shape[0] >= 2:
+        r2_variance_weighted = float(
+            r2_score(true[:, usable], pred[:, usable], multioutput="variance_weighted")
+        )
+        r2_uniform = float(
+            r2_score(true[:, usable], pred[:, usable], multioutput="uniform_average")
+        )
+    else:
+        r2_variance_weighted = 0.0
+        r2_uniform = 0.0
+    if not np.isfinite(r2_variance_weighted):
+        r2_variance_weighted = 0.0
+    if not np.isfinite(r2_uniform):
+        r2_uniform = 0.0
+    return {
+        "r2_variance_weighted": r2_variance_weighted,
+        "r2_uniform_average": r2_uniform,
+        "normalized_rmse_mean": float(np.mean(per_target_nrmse))
+        if per_target_nrmse
+        else None,
+        "primary_metrics": ["r2_variance_weighted", "r2_uniform_average"],
+        "per_target_metrics": per_target,
+        "per_target_r2_summary": {
+            "min": float(np.min(per_target_r2)) if per_target_r2 else None,
+            "median": float(np.median(per_target_r2)) if per_target_r2 else None,
+            "max": float(np.max(per_target_r2)) if per_target_r2 else None,
+        },
+        "per_target_normalized_rmse_summary": {
+            "min": float(np.min(per_target_nrmse)) if per_target_nrmse else None,
+            "median": float(np.median(per_target_nrmse)) if per_target_nrmse else None,
+            "max": float(np.max(per_target_nrmse)) if per_target_nrmse else None,
+        },
+    }
+
+
+class TargetMeanDummyRegressor(BaseEstimator, RegressorMixin):
+    """Mean baseline that preserves two-dimensional regression predictions."""
+
+    def fit(self, X: Any, y: Any) -> TargetMeanDummyRegressor:
+        """Fit per-target means."""
+        Y = np.asarray(y, dtype=float)
+        if Y.ndim == 1:
+            Y = Y.reshape(-1, 1)
+        self.mean_ = np.mean(Y, axis=0)
+        return self
+
+    def predict(self, X: Any) -> np.ndarray:
+        """Predict fitted target means for every row."""
+        return np.tile(self.mean_, (X.shape[0], 1))
+
+
+def summarize_regression_stability(
+    estimator: Any,
+    X: Any,
+    Y: np.ndarray,
+    *,
+    repeats: int,
+    random_state: int | None,
+    target_names: np.ndarray,
+    groups: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Estimate regression metric stability with repeated holdout splits."""
+    if repeats <= 0 or Y.shape[0] < 4:
+        return {
+            "stability_repeats": 0,
+            "stability_method": "disabled",
+            "stability_r2_variance_weighted_std": None,
+            "stability_r2_uniform_average_std": None,
+        }
+    if groups is not None:
+        unique_groups = np.unique(groups)
+        if unique_groups.shape[0] < 2:
+            return {
+                "stability_repeats": 0,
+                "stability_method": "group_split_unavailable",
+                "stability_r2_variance_weighted_std": None,
+                "stability_r2_uniform_average_std": None,
+            }
+        splitter = GroupShuffleSplit(
+            n_splits=repeats,
+            test_size=0.25,
+            random_state=random_state,
+        )
+        split_iter = splitter.split(X, Y, groups)
+        method = "group_shuffle_split"
+    else:
+        splitter = ShuffleSplit(
+            n_splits=repeats,
+            test_size=0.25,
+            random_state=random_state,
+        )
+        split_iter = splitter.split(X, Y)
+        method = "shuffle_split"
+
+    weighted_scores: list[float] = []
+    uniform_scores: list[float] = []
+    for train_idx, test_idx in split_iter:
+        fitted = _prepared_estimator(estimator, len(train_idx)).fit(
+            _slice_rows(X, train_idx), Y[train_idx]
+        )
+        preds = np.asarray(fitted.predict(_slice_rows(X, test_idx))).reshape(
+            Y[test_idx].shape
+        )
+        summary = summarize_regression_predictions(
+            Y[test_idx],
+            preds,
+            target_names=target_names,
+        )
+        weighted_scores.append(float(summary["r2_variance_weighted"]))
+        uniform_scores.append(float(summary["r2_uniform_average"]))
+    return {
+        "stability_repeats": len(weighted_scores),
+        "stability_method": method,
+        "stability_r2_variance_weighted_mean": float(np.mean(weighted_scores))
+        if weighted_scores
+        else None,
+        "stability_r2_variance_weighted_std": float(np.std(weighted_scores))
+        if weighted_scores
+        else None,
+        "stability_r2_uniform_average_mean": float(np.mean(uniform_scores))
+        if uniform_scores
+        else None,
+        "stability_r2_uniform_average_std": float(np.std(uniform_scores))
+        if uniform_scores
+        else None,
+    }

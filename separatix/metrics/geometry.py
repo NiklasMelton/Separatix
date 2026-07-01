@@ -20,10 +20,16 @@ def compute_geometry_diagnostics(
     *,
     config: ProfilerConfig,
     report_context: dict[str, Any],
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Compute cheap geometry reliability metrics."""
     X_used, y_used, sample_info = cap_samples_for_budget(
-        X, y, config=config, reason="neighbors"
+        X, y, config=config, reason="neighbors", groups=groups
+    )
+    groups_used = (
+        groups[np.asarray(sample_info["indices"], dtype=int)]
+        if groups is not None
+        else None
     )
     if sparse.issparse(X_used):
         svd = TruncatedSVD(
@@ -52,6 +58,7 @@ def compute_geometry_diagnostics(
         reason="geometry_distance_concentration",
         config=config,
         report_context=report_context,
+        groups=groups_used,
     )
     if dense_for_dist["skipped"]:
         concentration = None
