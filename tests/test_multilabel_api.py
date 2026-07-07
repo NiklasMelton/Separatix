@@ -50,9 +50,11 @@ def test_multilabel_report_serializes_and_prunes_verbose_fields() -> None:
     assert "predictions" not in terse["metrics"]["probes"]["linear"]
     assert "local_label_entropy" not in terse["metrics"]["neighborhood"]
     assert "trigger_names_by_index" not in terse["metrics"]["boundary"]
+    assert "sample_position_indices" not in terse["metrics"]["boundary"]
     assert "per_label_metrics" in full["metrics"]["probes"]["linear"]
     assert "predictions" in full["metrics"]["probes"]["linear"]
     assert "trigger_names_by_index" in full["metrics"]["boundary"]
+    assert "sample_position_indices" in full["metrics"]["boundary"]
     assert report.to_json()
 
 

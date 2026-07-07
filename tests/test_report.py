@@ -44,10 +44,12 @@ def test_report_serialization_is_terse_by_default() -> None:
     assert "local_entropy" not in neighborhood_terse
     assert "local_ambiguity" not in neighborhood_terse
     assert "candidate_indices" not in boundary_terse
+    assert "sample_position_indices" not in boundary_terse
     assert "predictions" not in linear_terse
     assert "local_entropy" in neighborhood_full
     assert "local_ambiguity" in neighborhood_full
     assert "candidate_indices" in boundary_full
+    assert "sample_position_indices" in boundary_full
     assert "predictions" in linear_full
 
 
@@ -61,10 +63,12 @@ def test_report_json_full_mode_preserves_verbose_fields() -> None:
     assert '"local_entropy"' not in terse_json
     assert '"local_ambiguity"' not in terse_json
     assert '"candidate_indices"' not in terse_json
+    assert '"sample_position_indices"' not in terse_json
     assert '"predictions"' not in terse_json
     assert '"local_entropy"' in full_json
     assert '"local_ambiguity"' in full_json
     assert '"candidate_indices"' in full_json
+    assert '"sample_position_indices"' in full_json
     assert '"predictions"' in full_json
 
 

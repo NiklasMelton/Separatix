@@ -21,6 +21,7 @@ _TERSE_PRUNED_KEYS = frozenset(
         "per_label_metrics",
         "per_target_metrics",
         "predictions",
+        "sample_position_indices",
         "strong_candidate_indices",
         "trigger_names_by_index",
         "indices",
