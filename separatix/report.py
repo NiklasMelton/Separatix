@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+import math
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
+
+import numpy as np
 
 _TERSE_PRUNED_KEYS = frozenset(
     {
@@ -30,16 +33,27 @@ _TERSE_PRUNED_KEYS = frozenset(
 )
 
 
-def _prune_verbose_items(value: Any) -> Any:
-    """Recursively remove verbose fields from a serialized report payload."""
+def _serialize_value(value: Any, *, terse: bool) -> Any:
+    """Convert report values without copying fields pruned from terse output."""
     if isinstance(value, dict):
         return {
-            key: _prune_verbose_items(item)
+            key: _serialize_value(item, terse=terse)
             for key, item in value.items()
-            if key not in _TERSE_PRUNED_KEYS
+            if not terse or key not in _TERSE_PRUNED_KEYS
         }
-    if isinstance(value, list):
-        return [_prune_verbose_items(item) for item in value]
+    if isinstance(value, (list, tuple)):
+        return [_serialize_value(item, terse=terse) for item in value]
+    if isinstance(value, np.ndarray):
+        return _serialize_value(value.tolist(), terse=terse)
+    if isinstance(value, np.generic):
+        return _serialize_value(value.item(), terse=terse)
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _serialize_value(getattr(value, field.name), terse=terse)
+            for field in fields(value)
+        }
     return value
 
 
@@ -67,9 +81,16 @@ class DiagnosticReport:
 
     def to_dict(self, *, terse: bool = True) -> dict[str, Any]:
         """Return a JSON-serializable dictionary representation."""
-        payload = asdict(self)
-        return _prune_verbose_items(payload) if terse else payload
+        return {
+            field.name: _serialize_value(getattr(self, field.name), terse=terse)
+            for field in fields(self)
+        }
 
     def to_json(self, *, indent: int = 2, terse: bool = True) -> str:
         """Return a JSON string representation of the report."""
-        return json.dumps(self.to_dict(terse=terse), indent=indent, sort_keys=True)
+        return json.dumps(
+            self.to_dict(terse=terse),
+            indent=indent,
+            sort_keys=True,
+            allow_nan=False,
+        )

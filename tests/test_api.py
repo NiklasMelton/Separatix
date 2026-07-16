@@ -1,6 +1,7 @@
 from sklearn.datasets import make_blobs
 
 from separatix import ComplexityProfiler, DiagnosticReport, diagnose
+from separatix.constants import INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
 
 
 def test_diagnose_returns_string() -> None:
@@ -41,3 +42,20 @@ def test_tiny_supported_dataset_degrades_gracefully() -> None:
         "cross_validation",
         "resubstitution_low_reliability",
     }
+
+
+def test_max_samples_below_class_support_skips_supervised_guidance() -> None:
+    X, y = make_blobs(n_samples=80, centers=2, random_state=0)
+    report = diagnose(
+        X,
+        y,
+        return_report=True,
+        max_samples=1,
+        topology="off",
+        random_state=0,
+    )
+    assert report.recommendation == INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
+    assert report.metrics["probes"]["linear"]["evaluation_mode"] == (
+        "insufficient_support"
+    )
+    assert report.sampling["probe"]["n_used"] == 0

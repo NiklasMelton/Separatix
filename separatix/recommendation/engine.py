@@ -34,6 +34,8 @@ ONE_STANDARD_ERROR = 1.0
 # Standard normal two-sided 95% critical value used to decide whether any
 # predictive probe has evidence above the class-prior dummy baseline.
 SIGNAL_CONFIDENCE_Z = 1.96
+MIN_SIGNAL_MARGIN = 0.05
+MIN_FAMILY_IMPROVEMENT = 0.01
 
 _FAMILY_ORDER = ("linear", "smooth_nonlinear", "local_kernel")
 _FAMILY_PROBES = {
@@ -61,6 +63,32 @@ _REGRESSION_FAMILY_RECOMMENDATIONS = {
     "smooth_nonlinear": SMOOTH_NONLINEAR_RESPONSE_RECOMMENDED,
     "local_kernel": KERNEL_OR_LOCAL_REGRESSION_RECOMMENDED,
 }
+
+
+def _context_quality_flags(metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate structured diagnostic outcomes into recommendation flags."""
+    flags: list[dict[str, Any]] = []
+    entries = metrics.get("quality_context", {}).get("skipped_diagnostics", [])
+    for entry in entries:
+        severity = entry.get("severity")
+        if severity not in {"blocking", "caution"}:
+            continue
+        flags.append(
+            {
+                "name": str(entry.get("name", "diagnostic_failure")),
+                "severity": severity,
+                "message": str(entry.get("reason", "A diagnostic was unavailable.")),
+            }
+        )
+    if metrics.get("quality_context", {}).get("errors"):
+        flags.append(
+            {
+                "name": "diagnostic_errors",
+                "severity": "caution",
+                "message": "One or more optional diagnostics failed at runtime.",
+            }
+        )
+    return flags
 
 
 @dataclass(frozen=True)
@@ -117,6 +145,9 @@ def _balanced_accuracy_standard_error(
     class_counts: list[int],
 ) -> float:
     score = float(result["balanced_accuracy"])
+    support_counts = result.get("evaluation_support", {}).get("class_counts")
+    if isinstance(support_counts, dict) and support_counts:
+        class_counts = [int(count) for count in support_counts.values()]
     recalls = result.get("per_class_recall")
     if (
         isinstance(recalls, list)
@@ -261,7 +292,9 @@ def _family_within_one_standard_error(
     tolerance = ONE_STANDARD_ERROR * (
         combined_error if combined_error is not None else MIN_NORMALIZED_SCORE
     )
-    return bool(best_family.score - family.score <= tolerance)
+    return bool(
+        best_family.score - family.score <= max(tolerance, MIN_FAMILY_IMPROVEMENT)
+    )
 
 
 def _family_comparison(
@@ -289,8 +322,12 @@ def _family_comparison(
         "combined_standard_error": combined_error,
         "z_score": float(z_score) if z_score is not None else None,
         "clear_advantage_z": SIGNAL_CONFIDENCE_Z,
-        "first_clearly_better": bool(score_gap > SIGNAL_CONFIDENCE_Z * tolerance),
-        "second_clearly_better": bool(-score_gap > SIGNAL_CONFIDENCE_Z * tolerance),
+        "first_clearly_better": bool(
+            score_gap > max(SIGNAL_CONFIDENCE_Z * tolerance, MIN_FAMILY_IMPROVEMENT)
+        ),
+        "second_clearly_better": bool(
+            -score_gap > max(SIGNAL_CONFIDENCE_Z * tolerance, MIN_FAMILY_IMPROVEMENT)
+        ),
     }
 
 
@@ -442,7 +479,7 @@ def _quality_flags(
         flags.append(
             {
                 "name": "resubstitution_evaluation",
-                "severity": "caution",
+                "severity": "blocking",
                 "message": (
                     "At least one probe used in-sample evaluation because there "
                     "were too few examples for stratified validation."
@@ -506,8 +543,11 @@ def _quality_flags(
         and best_family.score is not None
         and dummy_family.score is not None
         and signal_error is not None
-        and (SIGNAL_CONFIDENCE_Z * signal_error)
-        >= abs(best_family.score - dummy_family.score)
+        and (
+            best_family.score - dummy_family.score <= MIN_SIGNAL_MARGIN
+            or (SIGNAL_CONFIDENCE_Z * signal_error)
+            >= abs(best_family.score - dummy_family.score)
+        )
     ):
         flags.append(
             {
@@ -540,6 +580,10 @@ def _quality_flags(
                 ),
             }
         )
+    existing = {flag["name"] for flag in flags}
+    flags.extend(
+        flag for flag in _context_quality_flags(metrics) if flag["name"] not in existing
+    )
     return flags
 
 
@@ -599,6 +643,7 @@ def _build_recommendation_evidence(
             and signal_error is not None
             and raw_best_family.score - dummy_family.score
             > SIGNAL_CONFIDENCE_Z * signal_error
+            and raw_best_family.score - dummy_family.score > MIN_SIGNAL_MARGIN
         )
         if dummy_family.available
         else False
@@ -640,6 +685,7 @@ def _build_recommendation_evidence(
         ),
         "standard_error_multiplier": ONE_STANDARD_ERROR,
         "signal_confidence_z": SIGNAL_CONFIDENCE_Z,
+        "minimum_signal_margin": MIN_SIGNAL_MARGIN,
         "probe_table": _probe_table(probes),
         "families": _family_table(families),
         "raw_best_family": raw_best_family.family
@@ -987,12 +1033,15 @@ def _best_multilabel_probe_for_metric(
     for probe_name in _FAMILY_PROBES[family]:
         result = probes.get(probe_name, {})
         if metric in result:
+            effective_n = int(
+                result.get("evaluation_support", {}).get("n_samples", n_samples)
+            )
             candidates.append(
                 {
                     "probe": probe_name,
                     "score": float(result[metric]),
                     "standard_error": _multilabel_metric_error(
-                        result, metric, n_samples
+                        result, metric, effective_n
                     ),
                     "available": True,
                 }
@@ -1177,6 +1226,10 @@ def _multilabel_quality_flags(
                 ),
             }
         )
+    existing = {flag["name"] for flag in flags}
+    flags.extend(
+        flag for flag in _context_quality_flags(metrics) if flag["name"] not in existing
+    )
     return flags
 
 
@@ -1463,12 +1516,15 @@ def _best_regression_probe_for_metric(
     for probe_name in _FAMILY_PROBES[family]:
         result = probes.get(probe_name, {})
         if metric in result:
+            effective_n = int(
+                result.get("evaluation_support", {}).get("n_samples", n_samples)
+            )
             candidates.append(
                 {
                     "probe": probe_name,
                     "score": float(result[metric]),
                     "standard_error": _regression_metric_error(
-                        result, metric, n_samples
+                        result, metric, effective_n
                     ),
                     "available": True,
                 }
@@ -1623,6 +1679,10 @@ def _regression_quality_flags(
                 "message": "Target-neighborhood smoothness diagnostics were skipped.",
             }
         )
+    existing = {flag["name"] for flag in flags}
+    flags.extend(
+        flag for flag in _context_quality_flags(metrics) if flag["name"] not in existing
+    )
     return flags
 
 

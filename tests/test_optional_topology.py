@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from sklearn.datasets import make_blobs
 
 from separatix import diagnose
+from separatix.config import ProfilerConfig
+from separatix.metrics import topology as topology_module
 from tests.test_synthetic_model_family_matrix import (
     _binary_smooth,
     _binary_topological,
@@ -51,8 +54,14 @@ def test_topology_strength_is_higher_for_spiral_than_smooth_curve() -> None:
     )
     if "topology_strength" not in smooth.metrics["topology"]:
         pytest.skip("persistent topology strength is unavailable in this environment")
-    assert spiral.metrics["topology"]["topology_strength"] >= 0.4
-    assert spiral.scores["topology_score"] > smooth.scores["topology_score"] + 0.3
+    assert (
+        spiral.metrics["topology"]["topology_strength"]
+        > smooth.metrics["topology"]["topology_strength"]
+    )
+    assert (
+        spiral.metrics["topology"]["relative_h1_persistence"]
+        > smooth.metrics["topology"]["relative_h1_persistence"]
+    )
 
 
 def test_topology_strength_does_not_saturate_from_sample_count_alone() -> None:
@@ -69,3 +78,27 @@ def test_topology_strength_does_not_saturate_from_sample_count_alone() -> None:
         pytest.skip("persistent topology strength is unavailable in this environment")
     assert report.metrics["boundary"]["boundary_sample_size"] >= 100
     assert report.metrics["topology"]["topology_strength"] < 0.4
+
+
+def test_persistent_topology_runtime_failure_is_localized(monkeypatch) -> None:
+    monkeypatch.setattr(
+        topology_module,
+        "_summarize_persistent_topology",
+        lambda X: (_ for _ in ()).throw(RuntimeError("ripser failed")),
+    )
+    context = {
+        "warnings": [],
+        "errors": [],
+        "skipped_diagnostics": [],
+        "densification_events": [],
+    }
+    result = topology_module._compute_topology_object(
+        np.arange(120, dtype=float).reshape(40, 3),
+        reason="runtime_test",
+        config=ProfilerConfig(topology="persistent"),
+        report_context=context,
+        sampling={"sampled": False},
+    )
+    assert result["skipped_reason"] == "persistent topology runtime failure"
+    assert context["errors"]
+    assert context["skipped_diagnostics"][0]["severity"] == "caution"

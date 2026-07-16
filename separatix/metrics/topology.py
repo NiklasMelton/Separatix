@@ -21,6 +21,25 @@ _MAX_REPORTED_SKIPPED_LABELS = 50
 _REGRESSION_HARD_SUBSET_QUANTILE = 0.75
 
 
+def _record_topology_skip(
+    report_context: dict[str, Any],
+    *,
+    name: str,
+    reason: str,
+    config: ProfilerConfig,
+) -> None:
+    """Record optional topology availability without over-penalizing auto mode."""
+    explicit = config.topology == "persistent"
+    report_context.setdefault("skipped_diagnostics", []).append(
+        {
+            "name": name,
+            "reason": reason,
+            "status": "caution" if explicit else "informational",
+            "severity": "caution" if explicit else "info",
+        }
+    )
+
+
 def _boundary_scale(X: np.ndarray) -> float:
     """Return a simple coordinate-scale proxy for normalized persistence."""
     if X.size == 0:
@@ -343,11 +362,11 @@ def compute_regression_topology_diagnostics(
 
             persistent_available = True
         except ImportError:
-            report_context.setdefault("skipped_diagnostics", []).append(
-                {
-                    "name": "regression_persistent_topology",
-                    "reason": "ripser is not installed",
-                }
+            _record_topology_skip(
+                report_context,
+                name="regression_persistent_topology",
+                reason="ripser is not installed",
+                config=config,
             )
 
     residual_indices, residual_threshold, residual_error = (
@@ -448,10 +467,28 @@ def _compute_topology_object(
         }
 
     X_dense = np.asarray(dense_info["X"])
+    try:
+        summary = _summarize_persistent_topology(X_dense)
+    except Exception as exc:
+        message = (
+            f"Persistent topology failed for {reason}: {type(exc).__name__}: {exc}"
+        )
+        report_context.setdefault("errors", []).append(message)
+        _record_topology_skip(
+            report_context,
+            name=reason,
+            reason="persistent topology runtime failure",
+            config=config,
+        )
+        return {
+            "sample_size": int(X_dense.shape[0]),
+            "sampling": sampling,
+            "skipped_reason": "persistent topology runtime failure",
+        }
     return {
         "sample_size": int(X_dense.shape[0]),
         "sampling": sampling,
-        **_summarize_persistent_topology(X_dense),
+        **summary,
     }
 
 
@@ -478,16 +515,22 @@ def compute_topology_diagnostics(
 
     indices = np.asarray(boundary.get("candidate_indices", []), dtype=int)
     if indices.shape[0] < _MIN_TOPOLOGY_SAMPLES:
-        report_context.setdefault("skipped_diagnostics", []).append(
-            {"name": "persistent_topology", "reason": "too few boundary candidates"}
+        _record_topology_skip(
+            report_context,
+            name="persistent_topology",
+            reason="too few boundary candidates",
+            config=config,
         )
         return {
             "mode": config.topology,
             "skipped_reason": "too few boundary candidates",
         }
     if indices.shape[0] > 2000:
-        report_context.setdefault("skipped_diagnostics", []).append(
-            {"name": "persistent_topology", "reason": "too many boundary candidates"}
+        _record_topology_skip(
+            report_context,
+            name="persistent_topology",
+            reason="too many boundary candidates",
+            config=config,
         )
         return {
             "mode": config.topology,
@@ -497,8 +540,11 @@ def compute_topology_diagnostics(
         geometry.get("distance_concentration_proxy") is not None
         and geometry["distance_concentration_proxy"] < 0.05
     ):
-        report_context.setdefault("skipped_diagnostics", []).append(
-            {"name": "persistent_topology", "reason": "geometry reliability too low"}
+        _record_topology_skip(
+            report_context,
+            name="persistent_topology",
+            reason="geometry reliability too low",
+            config=config,
         )
         return {
             "mode": config.topology,
@@ -508,8 +554,11 @@ def compute_topology_diagnostics(
     try:
         from ripser import ripser as _ripser  # noqa: F401
     except ImportError:
-        report_context.setdefault("skipped_diagnostics", []).append(
-            {"name": "persistent_topology", "reason": "ripser is not installed"}
+        _record_topology_skip(
+            report_context,
+            name="persistent_topology",
+            reason="ripser is not installed",
+            config=config,
         )
         return {"mode": config.topology, "skipped_reason": "ripser is not installed"}
 
@@ -526,10 +575,22 @@ def compute_topology_diagnostics(
             "skipped_reason": "dense conversion unavailable",
         }
 
-    return {
-        "mode": config.topology,
-        **_summarize_persistent_topology(np.asarray(dense_info["X"])),
-    }
+    try:
+        summary = _summarize_persistent_topology(np.asarray(dense_info["X"]))
+    except Exception as exc:
+        message = f"Persistent topology failed: {type(exc).__name__}: {exc}"
+        report_context.setdefault("errors", []).append(message)
+        _record_topology_skip(
+            report_context,
+            name="persistent_topology",
+            reason="persistent topology runtime failure",
+            config=config,
+        )
+        return {
+            "mode": config.topology,
+            "skipped_reason": "persistent topology runtime failure",
+        }
+    return {"mode": config.topology, **summary}
 
 
 def _multilabel_topology_skip(
@@ -537,13 +598,22 @@ def _multilabel_topology_skip(
     mode: str,
     reason: str,
     report_context: dict[str, Any] | None = None,
+    config: ProfilerConfig | None = None,
     record: bool = False,
 ) -> dict[str, Any]:
     """Return a skipped multilabel topology payload."""
     if record and report_context is not None:
-        report_context.setdefault("skipped_diagnostics", []).append(
-            {"name": "multilabel_persistent_topology", "reason": reason}
-        )
+        if config is None:
+            report_context.setdefault("skipped_diagnostics", []).append(
+                {"name": "multilabel_persistent_topology", "reason": reason}
+            )
+        else:
+            _record_topology_skip(
+                report_context,
+                name="multilabel_persistent_topology",
+                reason=reason,
+                config=config,
+            )
     return {"target_type": "multilabel", "mode": mode, "skipped_reason": reason}
 
 
@@ -626,11 +696,11 @@ def compute_multilabel_topology_diagnostics(
         label_names=label_names,
     )
     if boundary_indices.shape[0] < _MIN_TOPOLOGY_SAMPLES and not selected_labels:
-        report_context.setdefault("skipped_diagnostics", []).append(
-            {
-                "name": "multilabel_boundary_topology",
-                "reason": "too few boundary candidates",
-            }
+        _record_topology_skip(
+            report_context,
+            name="multilabel_boundary_topology",
+            reason="too few boundary candidates",
+            config=config,
         )
         return {
             "target_type": "multilabel",
@@ -654,6 +724,7 @@ def compute_multilabel_topology_diagnostics(
             mode=config.topology,
             reason="ripser is not installed",
             report_context=report_context,
+            config=config,
             record=True,
         )
 
@@ -665,11 +736,11 @@ def compute_multilabel_topology_diagnostics(
             "sample_size": int(boundary_indices.shape[0]),
             "skipped_reason": "too few boundary candidates",
         }
-        report_context.setdefault("skipped_diagnostics", []).append(
-            {
-                "name": "multilabel_boundary_topology",
-                "reason": "too few boundary candidates",
-            }
+        _record_topology_skip(
+            report_context,
+            name="multilabel_boundary_topology",
+            reason="too few boundary candidates",
+            config=config,
         )
     else:
         boundary_used, boundary_sampling = _sample_indices(

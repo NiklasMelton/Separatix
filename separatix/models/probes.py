@@ -18,7 +18,12 @@ from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
 from separatix.config import ProfilerConfig
 from separatix.constants import BUDGETS
-from separatix.densify import ensure_dense_or_sample, ensure_dense_or_sample_regression
+from separatix.densify import (
+    ensure_dense_multilabel_target,
+    ensure_dense_or_sample,
+    ensure_dense_or_sample_multilabel,
+    ensure_dense_or_sample_regression,
+)
 from separatix.models.scoring import (
     MultilabelPriorDummy,
     TargetMeanDummyRegressor,
@@ -40,9 +45,7 @@ from separatix.sampling import (
     cap_regression_samples_for_budget,
     cap_samples_for_budget,
     choose_multilabel_cv,
-    multilabel_subsample_indices,
 )
-from separatix.utils.warnings import record_warning
 
 _QUADRATIC_DEGREE = 2
 _MAX_FULL_QUADRATIC_FEATURES = 50_000
@@ -53,12 +56,44 @@ _SMOOTH_PROBE_SKIP_REASON = (
 )
 
 
-def _linear_classifier(X: Any) -> LogisticRegression:
+def _feature_scaler(X: Any) -> StandardScaler:
+    """Return fold-local scaling compatible with the feature representation."""
+    return StandardScaler(with_mean=not sparse.issparse(X))
+
+
+def _scaled_pipeline(X: Any, estimator: Any, *, name: str) -> Pipeline:
+    """Wrap an estimator in fold-local feature scaling."""
+    return Pipeline([("scale", _feature_scaler(X)), (name, estimator)])
+
+
+def _prediction_evidence(predictions: Any, config: ProfilerConfig) -> dict[str, Any]:
+    """Retain row-level predictions only when they fit the dense-memory budget."""
+    prediction_array = np.asarray(predictions)
+    limit_bytes = int(config.max_dense_mb * 1024**2)
+    if prediction_array.nbytes > limit_bytes:
+        return {
+            "predictions": None,
+            "predictions_omitted_reason": (
+                "row-level prediction evidence exceeds max_dense_mb"
+            ),
+            "prediction_evidence_bytes": int(prediction_array.nbytes),
+        }
+    return {
+        "predictions": prediction_array.tolist(),
+        "prediction_evidence_bytes": int(prediction_array.nbytes),
+    }
+
+
+def _linear_classifier(X: Any) -> Pipeline:
     solver = "saga" if sparse.issparse(X) else "lbfgs"
-    return LogisticRegression(
-        max_iter=3000,
-        class_weight="balanced",
-        solver=solver,
+    return _scaled_pipeline(
+        X,
+        LogisticRegression(
+            max_iter=3000,
+            class_weight="balanced",
+            solver=solver,
+        ),
+        name="clf",
     )
 
 
@@ -76,11 +111,15 @@ def _multilabel_linear_classifier(
     """Return a sparse-aware one-vs-rest logistic probe."""
     solver = "saga" if sparse.issparse(X) else "lbfgs"
     return OneVsRestClassifier(
-        LogisticRegression(
-            max_iter=3000,
-            class_weight="balanced",
-            solver=solver,
-            random_state=config.random_state,
+        _scaled_pipeline(
+            X,
+            LogisticRegression(
+                max_iter=3000,
+                class_weight="balanced",
+                solver=solver,
+                random_state=config.random_state,
+            ),
+            name="clf",
         ),
         n_jobs=config.n_jobs,
     )
@@ -97,8 +136,9 @@ def _estimate_dense_mb(n_rows: int, n_features: int, dtype: np.dtype[Any]) -> fl
 def _full_quadratic_classifier(random_state: int | None) -> Pipeline:
     return Pipeline(
         [
+            ("scale_in", StandardScaler()),
             ("poly", PolynomialFeatures(degree=_QUADRATIC_DEGREE, include_bias=False)),
-            ("scale", StandardScaler()),
+            ("scale_out", StandardScaler()),
             (
                 "clf",
                 LogisticRegression(
@@ -160,8 +200,9 @@ def _full_multilabel_quadratic_classifier(config: ProfilerConfig) -> Pipeline:
     """Return a full quadratic multilabel probe pipeline."""
     return Pipeline(
         [
+            ("scale_in", StandardScaler()),
             ("poly", PolynomialFeatures(degree=_QUADRATIC_DEGREE, include_bias=False)),
-            ("scale", StandardScaler()),
+            ("scale_out", StandardScaler()),
             ("clf", _multilabel_linear_classifier(np.zeros((1, 1)), config)),
         ]
     )
@@ -204,6 +245,50 @@ def _choose_sketch_components(
     return int(min(preferred, max_by_memory))
 
 
+def _fold_count(cv: Any | None) -> int:
+    """Return the configured number of validation folds when available."""
+    if cv is None:
+        return 0
+    try:
+        return int(cv.get_n_splits())
+    except (AttributeError, TypeError):
+        return 0
+
+
+def _classification_evaluation_support(y: np.ndarray, cv: Any | None) -> dict[str, Any]:
+    """Summarize the exact rows and class support used by a probe."""
+    classes, counts = np.unique(y, return_counts=True)
+    return {
+        "n_samples": int(y.shape[0]),
+        "cv_folds": _fold_count(cv),
+        "class_counts": {
+            str(cls): int(count)
+            for cls, count in zip(classes, counts)  # noqa: B905
+        },
+    }
+
+
+def _multilabel_evaluation_support(Y: Any, cv: Any | None) -> dict[str, Any]:
+    """Summarize the exact rows and label support used by a probe."""
+    dense = _dense_multilabel_matrix(Y)
+    positives = dense.sum(axis=0).astype(int)
+    return {
+        "n_samples": int(dense.shape[0]),
+        "cv_folds": _fold_count(cv),
+        "positive_counts": positives.tolist(),
+        "negative_counts": (dense.shape[0] - positives).tolist(),
+    }
+
+
+def _regression_evaluation_support(Y: np.ndarray, cv: Any | None) -> dict[str, Any]:
+    """Summarize the exact rows and target support used by a probe."""
+    return {
+        "n_samples": int(Y.shape[0]),
+        "cv_folds": _fold_count(cv),
+        "target_variance": np.var(Y, axis=0).astype(float).tolist(),
+    }
+
+
 def run_model_probes(
     X: Any,
     y: np.ndarray,
@@ -223,39 +308,56 @@ def run_model_probes(
         if groups is not None
         else None
     )
+    if sample_info.get("support_preserved") is False:
+        reason = str(sample_info.get("skip_reason"))
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {"name": "model_probes", "reason": reason, "severity": "blocking"}
+        )
+        return {
+            name: {
+                "skipped_reason": reason,
+                "model_name": model_name,
+                "sample_info": sample_info,
+                "evaluation_mode": "insufficient_support",
+            }
+            for name, model_name in {
+                "dummy": "DummyClassifier",
+                "linear": "LogisticRegression",
+                "knn": "KNeighborsClassifier",
+                "smooth_poly": "PolynomialFeatures+LogisticRegression",
+                "kernel_approx": "RBFSampler+SGDClassifier",
+            }.items()
+        }
     cv, cv_method = choose_cv(
         y_used,
         budget["cv_folds"],
         groups=groups_used,
         random_state=config.random_state,
     )
-    warnings_list = report_context.setdefault("warnings", [])
-    if cv is None and groups is None:
-        record_warning(
-            (
-                "Very small class counts forced low-reliability "
-                "in-sample probe evaluation."
-            ),
-            warnings_list,
-            UserWarning,
-        )
-    if cv is None and groups is not None:
+    if cv is None:
         skipped = report_context.setdefault("skipped_diagnostics", [])
+        reason = (
+            "No valid group-disjoint supervised split was available after "
+            "filtering unsupported classes."
+            if groups is not None
+            else "At least two examples per class are required for held-out probes."
+        )
         skipped.append(
             {
-                "name": "group_cross_validation",
-                "reason": (
-                    "No valid group-disjoint supervised split was available after "
-                    "filtering unsupported classes."
-                ),
+                "name": "supervised_cross_validation",
+                "reason": reason,
+                "severity": "blocking",
             }
+        )
+        evaluation_mode = (
+            "group_split_unavailable" if groups is not None else "insufficient_support"
         )
         return {
             name: {
-                "skipped_reason": "group-disjoint supervised split unavailable",
+                "skipped_reason": reason,
                 "model_name": estimator.__class__.__name__,
                 "sample_info": sample_info,
-                "evaluation_mode": "group_split_unavailable",
+                "evaluation_mode": evaluation_mode,
                 "cv_stratification_method": cv_method,
             }
             for name, estimator in {
@@ -270,28 +372,32 @@ def run_model_probes(
             }.items()
         } | {
             "smooth_poly": {
-                "skipped_reason": "group-disjoint supervised split unavailable",
+                "skipped_reason": reason,
                 "model_name": "PolynomialFeatures+LogisticRegression",
                 "sample_info": sample_info,
-                "evaluation_mode": "group_split_unavailable",
+                "evaluation_mode": evaluation_mode,
                 "cv_stratification_method": cv_method,
             },
             "kernel_approx": {
-                "skipped_reason": "group-disjoint supervised split unavailable",
+                "skipped_reason": reason,
                 "model_name": "RBFSampler+SGDClassifier",
                 "sample_info": sample_info,
-                "evaluation_mode": "group_split_unavailable",
+                "evaluation_mode": evaluation_mode,
                 "cv_stratification_method": cv_method,
             },
         }
     probes: dict[str, Any] = {
         "dummy": DummyClassifier(strategy="prior"),
         "linear": _linear_classifier(X_used),
-        "knn": KNeighborsClassifier(
-            n_neighbors=min(
-                max(1, len(y_used) - 1),
-                min(15, max(3, int(np.sqrt(len(y_used))))),
-            )
+        "knn": _scaled_pipeline(
+            X_used,
+            KNeighborsClassifier(
+                n_neighbors=min(
+                    max(1, len(y_used) - 1),
+                    min(15, max(3, int(np.sqrt(len(y_used))))),
+                )
+            ),
+            name="knn",
         ),
     }
     results: dict[str, dict[str, object]] = {}
@@ -322,7 +428,8 @@ def run_model_probes(
                 "sample_info": sample_info,
                 "evaluation_mode": evaluation_mode,
                 "cv_stratification_method": cv_method,
-                "predictions": preds.tolist(),
+                **_prediction_evidence(preds, config),
+                "evaluation_support": _classification_evaluation_support(y_used, cv),
             }
         )
         results[name] = metrics
@@ -389,7 +496,10 @@ def run_model_probes(
                     "runtime_seconds": float(time.perf_counter() - start),
                     "evaluation_mode": evaluation_mode,
                     "cv_stratification_method": cv_smooth_method,
-                    "predictions": preds.tolist(),
+                    **_prediction_evidence(preds, config),
+                    "evaluation_support": _classification_evaluation_support(
+                        dense_y, cv_smooth
+                    ),
                 }
             )
             results["smooth_poly"] = metrics
@@ -449,7 +559,10 @@ def run_model_probes(
                         "runtime_seconds": float(time.perf_counter() - start),
                         "evaluation_mode": evaluation_mode,
                         "cv_stratification_method": cv_smooth_method,
-                        "predictions": preds.tolist(),
+                        **_prediction_evidence(preds, config),
+                        "evaluation_support": _classification_evaluation_support(
+                            dense_y, cv_smooth
+                        ),
                     }
                 )
                 results["smooth_poly"] = metrics
@@ -472,6 +585,7 @@ def run_model_probes(
         else:
             estimator = Pipeline(
                 [
+                    ("scale_in", StandardScaler()),
                     (
                         "rff",
                         RBFSampler(
@@ -482,6 +596,7 @@ def run_model_probes(
                             random_state=config.random_state,
                         ),
                     ),
+                    ("scale_out", StandardScaler()),
                     (
                         "clf",
                         SGDClassifier(
@@ -532,7 +647,16 @@ def run_model_probes(
                         groups=dense_info.get("groups"),
                         random_state=config.random_state,
                     )[1],
-                    "predictions": preds.tolist(),
+                    **_prediction_evidence(preds, config),
+                    "evaluation_support": _classification_evaluation_support(
+                        np.asarray(dense_info["y"]),
+                        choose_cv(
+                            dense_info["y"],
+                            budget["cv_folds"],
+                            groups=dense_info.get("groups"),
+                            random_state=config.random_state,
+                        )[0],
+                    ),
                 }
             )
             results["kernel_approx"] = metrics
@@ -554,11 +678,12 @@ def _regression_smooth_estimator(
     if low_rank_components is None:
         return Pipeline(
             [
+                ("scale_in", StandardScaler()),
                 (
                     "poly",
                     PolynomialFeatures(degree=_QUADRATIC_DEGREE, include_bias=False),
                 ),
-                ("scale", StandardScaler()),
+                ("scale_out", StandardScaler()),
                 ("reg", Ridge(alpha=1.0, random_state=config.random_state)),
             ]
         )
@@ -601,6 +726,15 @@ def _record_regression_probe(
         groups=groups,
         random_state=config.random_state,
     )
+    if cv is None and groups is not None:
+        return {
+            "skipped_reason": "group-disjoint supervised split unavailable",
+            "model_name": model_name,
+            "probe_name": name,
+            "sample_info": sample_info,
+            "evaluation_mode": "group_split_unavailable",
+            "cv_method": cv_method,
+        }
     start = time.perf_counter()
     preds, evaluation_mode = evaluate_regression_estimator(
         estimator,
@@ -629,7 +763,8 @@ def _record_regression_probe(
             "sample_info": sample_info,
             "evaluation_mode": evaluation_mode,
             "cv_method": cv_method,
-            "predictions": np.asarray(preds).tolist(),
+            **_prediction_evidence(preds, config),
+            "evaluation_support": _regression_evaluation_support(Y, cv),
         }
     )
     if extra:
@@ -656,14 +791,46 @@ def run_regression_model_probes(
         if groups is not None
         else None
     )
+    if sample_info.get("support_preserved") is False:
+        reason = str(sample_info.get("skip_reason"))
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "regression_model_probes",
+                "reason": reason,
+                "severity": "blocking",
+            }
+        )
+        return {
+            name: {
+                "skipped_reason": reason,
+                "model_name": model_name,
+                "sample_info": sample_info,
+                "evaluation_mode": "insufficient_support",
+            }
+            for name, model_name in {
+                "dummy": "TargetMeanDummyRegressor",
+                "linear": "Ridge",
+                "knn": "KNeighborsRegressor",
+                "smooth_poly": "PolynomialFeatures+Ridge",
+                "kernel_approx": "RBFSampler+Ridge",
+            }.items()
+        }
     n_neighbors = min(
         max(1, Y_used.shape[0] - 1),
         min(15, max(3, int(np.sqrt(Y_used.shape[0])))),
     )
     probes: dict[str, Any] = {
         "dummy": TargetMeanDummyRegressor(),
-        "linear": Ridge(alpha=1.0, random_state=config.random_state),
-        "knn": KNeighborsRegressor(n_neighbors=n_neighbors),
+        "linear": _scaled_pipeline(
+            X_used,
+            Ridge(alpha=1.0, random_state=config.random_state),
+            name="reg",
+        ),
+        "knn": _scaled_pipeline(
+            X_used,
+            KNeighborsRegressor(n_neighbors=n_neighbors),
+            name="knn",
+        ),
     }
     results: dict[str, dict[str, object]] = {}
     for name, estimator in probes.items():
@@ -784,6 +951,7 @@ def run_regression_model_probes(
         else:
             estimator = Pipeline(
                 [
+                    ("scale_in", StandardScaler()),
                     (
                         "rff",
                         RBFSampler(
@@ -794,7 +962,7 @@ def run_regression_model_probes(
                             random_state=config.random_state,
                         ),
                     ),
-                    ("scale", StandardScaler()),
+                    ("scale_out", StandardScaler()),
                     ("reg", Ridge(alpha=1.0, random_state=config.random_state)),
                 ]
             )
@@ -828,93 +996,15 @@ def _ensure_dense_X_for_multilabel(
     report_context: dict[str, Any],
     groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Densify X for multilabel-only probes without altering single-label helpers."""
-    if not sparse.issparse(X):
-        return {
-            "X": np.asarray(X),
-            "Y": Y,
-            "groups": groups,
-            "performed": False,
-            "skipped": False,
-        }
-
-    densification_events = report_context.setdefault("densification_events", [])
-    warnings_list = report_context.setdefault("warnings", [])
-    skipped = report_context.setdefault("skipped_diagnostics", [])
-    dtype = X.dtype if X.dtype is not None else np.dtype(float)
-    estimated_mb = X.shape[0] * X.shape[1] * np.dtype(dtype).itemsize / 1024**2
-    event = {
-        "operation": "densify",
-        "reason": reason,
-        "input_shape": [int(X.shape[0]), int(X.shape[1])],
-        "estimated_full_dense_mb": float(estimated_mb),
-        "max_dense_mb": config.max_dense_mb,
-        "policy": config.densify_policy,
-        "sampling_used": False,
-        "n_original": int(X.shape[0]),
-        "n_used": int(X.shape[0]),
-        "status": "performed",
-    }
-    if estimated_mb <= config.max_dense_mb:
-        densification_events.append(event)
-        return {"X": X.toarray(), "Y": Y, "performed": True, "skipped": False}
-
-    if config.densify_policy == "fail":
-        from separatix.exceptions import DensificationError
-
-        raise DensificationError(
-            f"Dense conversion for {reason} would exceed "
-            f"max_dense_mb={config.max_dense_mb}."
-        )
-    if config.densify_policy == "skip":
-        event["status"] = "skipped"
-        densification_events.append(event)
-        skipped.append(
-            {
-                "name": reason,
-                "reason": "dense conversion exceeds configured memory budget",
-            }
-        )
-        return {"X": None, "Y": Y, "performed": False, "skipped": True}
-
-    max_rows = floor(
-        (config.max_dense_mb * 1024**2) / (X.shape[1] * np.dtype(dtype).itemsize)
-    )
-    n_used = min(X.shape[0], max_rows, config.max_samples or X.shape[0])
-    if n_used < min(config.min_dense_samples, X.shape[0]):
-        event["status"] = "skipped_too_small"
-        event["n_used"] = int(max(n_used, 0))
-        densification_events.append(event)
-        skipped.append({"name": reason, "reason": "dense subsample would be too small"})
-        return {"X": None, "Y": Y, "performed": False, "skipped": True}
-
-    indices, method = multilabel_subsample_indices(
+    """Densify X for multilabel probes while preserving aligned grouping."""
+    return ensure_dense_or_sample_multilabel(
+        X,
         Y,
-        n_samples=n_used,
+        reason=reason,
         config=config,
+        report_context=report_context,
         groups=groups,
     )
-    event["sampling_used"] = True
-    event["sampling_method"] = method
-    event["n_used"] = int(indices.shape[0])
-    event["status"] = "performed_on_subsample"
-    densification_events.append(event)
-    if config.warn_on_densify:
-        from separatix.exceptions import DensificationWarning
-
-        record_warning(
-            f"Sparse input was multilabel-subsampled then densified for {reason}.",
-            warnings_list,
-            DensificationWarning,
-        )
-    Y_used = Y[indices] if not sparse.issparse(Y) else Y[indices, :]
-    return {
-        "X": X[indices, :].toarray(),
-        "Y": Y_used,
-        "groups": groups[indices] if groups is not None else None,
-        "performed": True,
-        "skipped": False,
-    }
 
 
 def _evaluate_multilabel_probe(
@@ -937,12 +1027,17 @@ def _evaluate_multilabel_probe(
         config=config,
         groups=groups,
     )
-    if cv is None and groups is not None:
+    if cv is None:
+        unavailable = (
+            "group-disjoint supervised split unavailable"
+            if groups is not None
+            else "support-preserving supervised split unavailable"
+        )
         return {
-            "skipped_reason": "group-disjoint supervised split unavailable",
+            "skipped_reason": unavailable,
             "model_name": name,
             "sample_info": sample_info,
-            "evaluation_mode": "group_split_unavailable",
+            "evaluation_mode": cv_method,
             "cv_stratification_method": cv_method,
         }
     preds, evaluation_mode = evaluate_multilabel_estimator(
@@ -972,7 +1067,8 @@ def _evaluate_multilabel_probe(
             "sample_info": sample_info,
             "evaluation_mode": evaluation_mode,
             "cv_stratification_method": cv_method,
-            "predictions": preds.tolist(),
+            **_prediction_evidence(preds, config),
+            "evaluation_support": _multilabel_evaluation_support(Y, cv),
         }
     )
     return metrics
@@ -1001,6 +1097,70 @@ def run_multilabel_model_probes(
         if groups is not None
         else None
     )
+    if sample_info.get("support_preserved") is False:
+        reason = str(sample_info.get("skip_reason"))
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "multilabel_model_probes",
+                "reason": reason,
+                "severity": "blocking",
+            }
+        )
+        return {
+            name: {
+                "skipped_reason": reason,
+                "model_name": model_name,
+                "sample_info": sample_info,
+                "evaluation_mode": "insufficient_support",
+            }
+            for name, model_name in {
+                "dummy": "MultilabelPriorDummy",
+                "linear": "OneVsRestLogisticRegression",
+                "knn": "KNeighborsClassifier",
+                "smooth_poly": "PolynomialFeatures+OneVsRestLogisticRegression",
+                "kernel_approx": "RBFSampler+OneVsRestSGDClassifier",
+            }.items()
+        }
+    target_info = ensure_dense_multilabel_target(
+        X_used,
+        Y_used,
+        reason="multilabel_probe_target",
+        config=config,
+        report_context=report_context,
+        groups=groups_used,
+    )
+    if target_info["skipped"]:
+        reason = "multilabel target exceeds configured dense-memory budget"
+        return {
+            name: {
+                "skipped_reason": reason,
+                "model_name": model_name,
+                "sample_info": sample_info,
+                "evaluation_mode": "memory_budget_unavailable",
+            }
+            for name, model_name in {
+                "dummy": "MultilabelPriorDummy",
+                "linear": "OneVsRestLogisticRegression",
+                "knn": "KNeighborsClassifier",
+                "smooth_poly": "PolynomialFeatures+OneVsRestLogisticRegression",
+                "kernel_approx": "RBFSampler+OneVsRestSGDClassifier",
+            }.items()
+        }
+    relative_indices = np.asarray(target_info["indices"], dtype=int)
+    original_indices = np.asarray(sample_info["indices"], dtype=int)
+    X_used = target_info["X"]
+    Y_used = target_info["Y"]
+    groups_used = target_info.get("groups")
+    if relative_indices.shape[0] != original_indices.shape[0] or not np.array_equal(
+        relative_indices, np.arange(original_indices.shape[0])
+    ):
+        sample_info = {
+            **sample_info,
+            "sampled": True,
+            "n_used": int(relative_indices.size),
+            "indices": original_indices[relative_indices].tolist(),
+            "target_memory_sampling": True,
+        }
     y_dense = _dense_multilabel_matrix(Y_used)
     n_neighbors = min(
         max(1, y_dense.shape[0] - 1),
@@ -1009,7 +1169,11 @@ def run_multilabel_model_probes(
     probes: dict[str, Any] = {
         "dummy": MultilabelPriorDummy(threshold=0.5),
         "linear": _multilabel_linear_classifier(X_used, config),
-        "knn": KNeighborsClassifier(n_neighbors=n_neighbors),
+        "knn": _scaled_pipeline(
+            X_used,
+            KNeighborsClassifier(n_neighbors=n_neighbors),
+            name="knn",
+        ),
     }
     results: dict[str, dict[str, Any]] = {}
     for name, estimator in probes.items():
@@ -1124,6 +1288,7 @@ def run_multilabel_model_probes(
         else:
             estimator = Pipeline(
                 [
+                    ("scale_in", StandardScaler()),
                     (
                         "rff",
                         RBFSampler(
@@ -1134,6 +1299,7 @@ def run_multilabel_model_probes(
                             random_state=config.random_state,
                         ),
                     ),
+                    ("scale_out", StandardScaler()),
                     (
                         "clf",
                         OneVsRestClassifier(

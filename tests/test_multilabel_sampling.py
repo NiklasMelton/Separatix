@@ -63,3 +63,28 @@ def test_iterative_mode_requires_optional_dependency_when_absent() -> None:
     config = ProfilerConfig(multilabel_stratification="iterative", random_state=0)
     with pytest.raises(ImportError):
         choose_multilabel_cv(Y, max_folds=5, config=config)
+
+
+def test_heuristic_multilabel_folds_preserve_both_label_sides() -> None:
+    rng = np.random.default_rng(8)
+    Y = (rng.random((120, 5)) < np.asarray([0.5, 0.35, 0.2, 0.15, 0.1])).astype(int)
+    config = ProfilerConfig(multilabel_stratification="heuristic", random_state=3)
+    cv, method = choose_multilabel_cv(Y, max_folds=5, config=config)
+    assert cv is not None
+    assert method == "heuristic"
+    for train_idx, test_idx in cv.split(np.zeros((Y.shape[0], 1)), Y):
+        for indices in (train_idx, test_idx):
+            positives = Y[indices].sum(axis=0)
+            assert np.all(positives > 0)
+            assert np.all(positives < indices.size)
+
+
+def test_installed_iterative_stratifier_is_selected() -> None:
+    if find_spec("iterstrat") is None:
+        pytest.skip("iterative-stratification is not installed")
+    rng = np.random.default_rng(11)
+    Y = (rng.random((100, 4)) < 0.3).astype(int)
+    config = ProfilerConfig(multilabel_stratification="iterative", random_state=0)
+    cv, method = choose_multilabel_cv(Y, max_folds=3, config=config)
+    assert cv is not None
+    assert method == "iterative"

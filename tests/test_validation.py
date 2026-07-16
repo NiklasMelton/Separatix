@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
+from separatix import ProfilerConfig
 from separatix.validation import validate_inputs
 
 
@@ -42,3 +43,46 @@ def test_validate_rejects_nan_features() -> None:
     y = np.array([0, 1])
     with pytest.raises(ValueError):
         validate_inputs(X, y)
+
+
+def test_nonintegral_numeric_labels_are_categorical() -> None:
+    X = np.arange(24, dtype=float).reshape(12, 2)
+    y = np.asarray([0.25, 1.75] * 6)
+    validated = validate_inputs(X, y)
+    assert validated.classes_.tolist() == [0.25, 1.75]
+
+
+@pytest.mark.parametrize(
+    ("X", "y", "match"),
+    [
+        (np.empty((4, 0)), np.asarray([0, 1, 0, 1]), "feature column"),
+        (
+            np.asarray([[1 + 2j], [2 + 0j]]),
+            np.asarray([0, 1]),
+            "real-valued features",
+        ),
+        (
+            np.asarray([[1.0], [2.0]]),
+            np.asarray([0 + 1j, 1 + 0j]),
+            "real-valued or string",
+        ),
+    ],
+)
+def test_rejects_zero_feature_and_complex_inputs(X, y, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        validate_inputs(X, y)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"n_jobs": 0},
+        {"random_state": -1},
+        {"random_state": 2**32},
+        {"random_state": 1.5},
+        {"max_samples": 1.5},
+    ],
+)
+def test_config_rejects_invalid_integer_controls(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        ProfilerConfig(**kwargs)

@@ -52,10 +52,10 @@ def compute_boundary_candidates(
             "class_composition": {},
             "warning": "Boundary diagnostics unavailable.",
         }
-    entropy_threshold = float(np.quantile(local_entropy, 0.75))
+    entropy_threshold = max(0.25, float(np.quantile(local_entropy, 0.75)))
     ambiguity_threshold = max(0.33, float(np.quantile(local_ambiguity, 0.75)))
-    candidate_mask = (local_entropy >= entropy_threshold) | (
-        local_ambiguity >= ambiguity_threshold
+    candidate_mask = ((local_entropy > 0.0) & (local_entropy >= entropy_threshold)) | (
+        (local_ambiguity > 0.0) & (local_ambiguity >= ambiguity_threshold)
     )
     linear_preds = _aligned_predictions(probes.get("linear", {}), row_indices)
     knn_preds = _aligned_predictions(probes.get("knn", {}), row_indices)
@@ -81,14 +81,6 @@ def compute_boundary_candidates(
     }
 
 
-def _dense_multilabel_matrix(Y: Any) -> np.ndarray:
-    """Return a dense multilabel indicator matrix."""
-    dense = Y.toarray() if hasattr(Y, "toarray") else np.asarray(Y)
-    if dense.ndim == 1:
-        dense = dense.reshape(-1, 1)
-    return dense.astype(np.int8, copy=False)
-
-
 def _sample_prediction_jaccard(first: np.ndarray, second: np.ndarray) -> np.ndarray:
     """Return samplewise Jaccard similarity between two multilabel predictions."""
     first_bool = first.astype(bool)
@@ -98,13 +90,13 @@ def _sample_prediction_jaccard(first: np.ndarray, second: np.ndarray) -> np.ndar
     return np.divide(
         intersection,
         union,
-        out=np.zeros_like(intersection, dtype=float),
+        out=np.ones_like(intersection, dtype=float),
         where=union > 0,
     )
 
 
 def _top_candidate_label_counts(
-    Y_dense: np.ndarray,
+    Y: Any,
     label_names: np.ndarray,
     indices: np.ndarray,
     *,
@@ -113,7 +105,7 @@ def _top_candidate_label_counts(
     """Return the top label counts within a candidate subset."""
     if indices.size == 0:
         return []
-    counts = Y_dense[indices].sum(axis=0).astype(int)
+    counts = np.asarray(Y[indices].sum(axis=0)).ravel().astype(int)
     order = np.argsort(-counts)[:limit]
     return [
         {"label": str(label_names[idx]), "count": int(counts[idx])}
@@ -165,19 +157,25 @@ def compute_multilabel_boundary_candidates(
         }
 
     thresholds = {
-        "low_neighbor_jaccard": float(np.quantile(local_jaccard, 0.25)),
-        "high_neighbor_hamming": float(np.quantile(local_hamming, 0.75)),
-        "high_local_label_entropy": float(np.quantile(local_entropy, 0.75)),
-        "high_cardinality_variance": float(np.quantile(local_cardinality_std, 0.75)),
+        "low_neighbor_jaccard": min(0.5, float(np.quantile(local_jaccard, 0.25))),
+        "high_neighbor_hamming": max(0.1, float(np.quantile(local_hamming, 0.75))),
+        "high_local_label_entropy": max(0.25, float(np.quantile(local_entropy, 0.75))),
+        "high_cardinality_variance": max(
+            0.5, float(np.quantile(local_cardinality_std, 0.75))
+        ),
     }
     trigger_masks: dict[str, np.ndarray] = {
-        "low_neighbor_jaccard": local_jaccard <= thresholds["low_neighbor_jaccard"],
-        "high_neighbor_hamming": local_hamming >= thresholds["high_neighbor_hamming"],
+        "low_neighbor_jaccard": (local_jaccard < 1.0)
+        & (local_jaccard <= thresholds["low_neighbor_jaccard"]),
+        "high_neighbor_hamming": (local_hamming > 0.0)
+        & (local_hamming >= thresholds["high_neighbor_hamming"]),
         "high_local_label_entropy": (
-            local_entropy >= thresholds["high_local_label_entropy"]
+            (local_entropy > 0.0)
+            & (local_entropy >= thresholds["high_local_label_entropy"])
         ),
         "high_cardinality_variance": (
-            local_cardinality_std >= thresholds["high_cardinality_variance"]
+            (local_cardinality_std > 0.0)
+            & (local_cardinality_std >= thresholds["high_cardinality_variance"])
         ),
     }
 
@@ -203,12 +201,12 @@ def compute_multilabel_boundary_candidates(
             np.asarray(aligned_linear, dtype=int),
             np.asarray(aligned_local, dtype=int),
         )
-        prediction_similarity_threshold = float(
-            np.quantile(prediction_similarity, 0.25)
+        prediction_similarity_threshold = min(
+            0.5, float(np.quantile(prediction_similarity, 0.25))
         )
         trigger_masks["linear_vs_local_prediction_disagreement"] = (
-            prediction_similarity <= prediction_similarity_threshold
-        )
+            prediction_similarity < 1.0
+        ) & (prediction_similarity <= prediction_similarity_threshold)
     else:
         trigger_masks["linear_vs_local_prediction_disagreement"] = np.zeros(
             local_jaccard.shape[0], dtype=bool
@@ -231,9 +229,10 @@ def compute_multilabel_boundary_candidates(
     strong_positions = np.flatnonzero(strong_candidate_mask)
     indices = row_indices[sample_positions]
     strong_indices = row_indices[strong_positions]
-    Y_dense = _dense_multilabel_matrix(Y)
     candidate_cardinality = (
-        Y_dense[indices].sum(axis=1).astype(float) if indices.size else np.array([])
+        np.asarray(Y[indices].sum(axis=1)).ravel().astype(float)
+        if indices.size
+        else np.array([])
     )
     trigger_thresholds = {
         **thresholds,
@@ -243,9 +242,9 @@ def compute_multilabel_boundary_candidates(
         "candidate_indices": indices.tolist(),
         "strong_candidate_indices": strong_indices.tolist(),
         "sample_position_indices": sample_positions.tolist(),
-        "candidate_fraction": float(indices.shape[0] / max(1, Y_dense.shape[0])),
+        "candidate_fraction": float(indices.shape[0] / max(1, Y.shape[0])),
         "strong_candidate_fraction": float(
-            strong_indices.shape[0] / max(1, Y_dense.shape[0])
+            strong_indices.shape[0] / max(1, Y.shape[0])
         ),
         "boundary_sample_size": int(indices.shape[0]),
         "trigger_counts": trigger_counts,
@@ -276,9 +275,9 @@ def compute_multilabel_boundary_candidates(
             ),
         },
         "top_candidate_label_counts": _top_candidate_label_counts(
-            Y_dense, label_names, indices
+            Y, label_names, indices
         ),
         "warning": "Boundary sample is very small."
-        if indices.shape[0] < max(10, Y_dense.shape[1])
+        if indices.shape[0] < max(10, Y.shape[1])
         else None,
     }
