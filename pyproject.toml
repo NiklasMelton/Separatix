@@ -33,6 +33,11 @@ mypy = ">=1"
 build = ">=1"
 twine = ">=5"
 
+[tool.poetry.group.docs.dependencies]
+sphinx = ">=7.2,<9"
+furo = ">=2024.8.6"
+myst-parser = ">=3,<5"
+
 [tool.ruff]
 line-length = 88
 

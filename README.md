@@ -187,7 +187,7 @@ The recommendation is produced by a fixed, inspectable pipeline:
    `raw_best_family` and `recommended_family` when a report is requested.
 
 The full rationale and decision rules are documented in
-[docs/decision_pipeline.md](docs/decision_pipeline.md).
+[docs/decision_pipeline.md](https://github.com/NiklasMelton/Separatix/blob/develop/docs/decision_pipeline.md).
 
 ## Sparse Inputs And Memory Behavior
 
@@ -217,17 +217,17 @@ visible.
 
 ## Examples
 
-- [examples/basic_breast_cancer.py](examples/basic_breast_cancer.py)
-- [examples/linear_hyperplane_visual.py](examples/linear_hyperplane_visual.py)
-- [examples/curvilinear_boundary_visual.py](examples/curvilinear_boundary_visual.py)
-- [examples/high_dimensional_linear_hyperplane.py](examples/high_dimensional_linear_hyperplane.py)
-- [examples/high_dimensional_curvilinear_hyperplane.py](examples/high_dimensional_curvilinear_hyperplane.py)
-- [examples/moons_vs_linear.py](examples/moons_vs_linear.py)
-- [examples/circles_kernel_signal.py](examples/circles_kernel_signal.py)
-- [examples/recommendation_complexity_ladder.py](examples/recommendation_complexity_ladder.py)
-- [examples/multiclass_wine.py](examples/multiclass_wine.py)
-- [examples/openml_multilabel_yeast.py](examples/openml_multilabel_yeast.py)
-- [examples/sparse_text_like_embeddings.py](examples/sparse_text_like_embeddings.py)
+- [examples/basic_breast_cancer.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/basic_breast_cancer.py)
+- [examples/linear_hyperplane_visual.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/linear_hyperplane_visual.py)
+- [examples/curvilinear_boundary_visual.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/curvilinear_boundary_visual.py)
+- [examples/high_dimensional_linear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_linear_hyperplane.py)
+- [examples/high_dimensional_curvilinear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_curvilinear_hyperplane.py)
+- [examples/moons_vs_linear.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/moons_vs_linear.py)
+- [examples/circles_kernel_signal.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/circles_kernel_signal.py)
+- [examples/recommendation_complexity_ladder.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/recommendation_complexity_ladder.py)
+- [examples/multiclass_wine.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/multiclass_wine.py)
+- [examples/openml_multilabel_yeast.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/openml_multilabel_yeast.py)
+- [examples/sparse_text_like_embeddings.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/sparse_text_like_embeddings.py)
 
 ## Related Work
 
