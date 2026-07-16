@@ -23,7 +23,11 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from separatix.config import ProfilerConfig
-from separatix.densify import ensure_dense_or_sample, ensure_dense_or_sample_regression
+from separatix.densify import (
+    ensure_dense_multilabel_target,
+    ensure_dense_or_sample,
+    ensure_dense_or_sample_regression,
+)
 from separatix.models.probes import (
     _choose_sketch_components,
     _dense_multilabel_matrix,
@@ -37,6 +41,7 @@ from separatix.models.probes import (
     _multilabel_linear_classifier,
     _quadratic_feature_count,
     _regression_smooth_estimator,
+    _scaled_pipeline,
 )
 from separatix.models.scoring import (
     MultilabelPriorDummy,
@@ -479,7 +484,7 @@ def _split_rows(
             random_state=config.random_state,
         )
         if cv is None:
-            return None, "resubstitution_low_reliability"
+            return None, method
         singlelabel_splitter: Any = cv
         split_iter = (
             singlelabel_splitter.split(X, y_array, groups)
@@ -499,7 +504,7 @@ def _split_rows(
             groups=groups,
         )
         if cv is None:
-            return None, "resubstitution_low_reliability"
+            return None, method
         split_y = (
             y_dense.ravel()
             if y_dense.shape[1] == 1 and method == "binary_stratified"
@@ -516,14 +521,14 @@ def _split_rows(
             for train, test in split_iter
         ], ("group_cross_validation" if groups is not None else "cross_validation")
     y_array = np.asarray(y, dtype=float)
-    cv, _ = choose_regression_cv(
+    cv, method = choose_regression_cv(
         y_array,
         max_folds,
         groups=groups,
         random_state=config.random_state,
     )
     if cv is None:
-        return None, "resubstitution_low_reliability"
+        return None, method
     regression_splitter: Any = cv
     split_iter = (
         regression_splitter.split(X, y_array, groups)
@@ -548,22 +553,39 @@ def _singlelabel_validation_indices(
         rows = np.arange(n_rows, dtype=int)
         return rows, rows[:0]
     if groups is not None and np.unique(groups).shape[0] >= 2:
-        torch = _torch_module()
-        del torch
         from sklearn.model_selection import GroupShuffleSplit
 
-        splitter = GroupShuffleSplit(
-            n_splits=1, test_size=0.2, random_state=random_state
-        )
-        return next(splitter.split(np.zeros((n_rows, 1)), y, groups))
+        for attempt in range(32):
+            seed = None if random_state is None else random_state + attempt
+            splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=seed)
+            fit_idx, valid_idx = next(splitter.split(np.zeros((n_rows, 1)), y, groups))
+            if (
+                np.unique(y[fit_idx]).shape[0] == np.unique(y).shape[0]
+                and np.unique(y[valid_idx]).shape[0] == np.unique(y).shape[0]
+            ):
+                return fit_idx, valid_idx
+        rows = np.arange(n_rows, dtype=int)
+        return rows, rows[:0]
     min_count = int(np.min(np.bincount(y)))
     if min_count >= 2:
         from sklearn.model_selection import StratifiedShuffleSplit
 
+        n_classes = int(np.unique(y).shape[0])
+        valid_size = max(n_classes, int(math.ceil(0.2 * n_rows)))
+        if n_rows - valid_size < n_classes:
+            rows = np.arange(n_rows, dtype=int)
+            return rows, rows[:0]
         splitter = StratifiedShuffleSplit(
-            n_splits=1, test_size=0.2, random_state=random_state
+            n_splits=1, test_size=valid_size, random_state=random_state
         )
-        return next(splitter.split(np.zeros((n_rows, 1)), y))
+        fit_idx, valid_idx = next(splitter.split(np.zeros((n_rows, 1)), y))
+        if (
+            np.unique(y[fit_idx]).shape[0] == n_classes
+            and np.unique(y[valid_idx]).shape[0] == n_classes
+        ):
+            return fit_idx, valid_idx
+        rows = np.arange(n_rows, dtype=int)
+        return rows, rows[:0]
     rows = np.arange(n_rows, dtype=int)
     split_at = max(1, int(math.floor(0.8 * n_rows)))
     return rows[:split_at], rows[split_at:]
@@ -588,8 +610,7 @@ def _multilabel_validation_indices(
     )
     if holdout is None:
         rows = np.arange(n_rows, dtype=int)
-        split_at = max(1, int(math.floor(0.8 * n_rows)))
-        return rows[:split_at], rows[split_at:]
+        return rows, rows[:0]
     split_y = Y.ravel() if Y.shape[1] == 1 and method == "binary_stratified" else Y
     split_iter = (
         holdout.split(np.zeros((n_rows, 1)), split_y, groups)
@@ -680,9 +701,7 @@ class _TorchMLPBase(BaseEstimator):
         torch = _torch_module()
         if torch is None:
             raise RuntimeError("torch is required for MLP probes but is not installed.")
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
-            torch.manual_seed(int(self.random_state))
+        seed = int(self.random_state) if self.random_state is not None else 0
         X_array = np.asarray(X, dtype=np.float32)
         if self.task == "singlelabel":
             y_array = np.asarray(y, dtype=np.int64)
@@ -717,8 +736,10 @@ class _TorchMLPBase(BaseEstimator):
         X_fit = self.x_scaler_.transform(X_array[fit_idx]).astype(
             np.float32, copy=False
         )
-        X_valid = self.x_scaler_.transform(X_array[valid_idx]).astype(
-            np.float32, copy=False
+        X_valid = (
+            self.x_scaler_.transform(X_array[valid_idx]).astype(np.float32, copy=False)
+            if valid_idx.size
+            else np.empty((0, X_array.shape[1]), dtype=np.float32)
         )
         if self.task == "regression":
             self.y_mean_ = np.mean(y_array[fit_idx], axis=0, keepdims=True)
@@ -734,7 +755,15 @@ class _TorchMLPBase(BaseEstimator):
             y_fit = y_array[fit_idx]
             y_valid = y_array[valid_idx]
 
-        model = self._init_model(torch, X_array.shape[1], output_dim).to(self.device)
+        # fork_rng restores the caller's torch RNG after deterministic model
+        # initialization. Batch ordering uses a dedicated CPU generator below.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            model = self._init_model(torch, X_array.shape[1], output_dim).to(
+                self.device
+            )
+        batch_generator = torch.Generator(device="cpu")
+        batch_generator.manual_seed(seed)
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=1e-3,
@@ -785,7 +814,9 @@ class _TorchMLPBase(BaseEstimator):
         batch_size = max(1, min(self.batch_size, X_fit.shape[0]))
         for epoch in range(self.epochs):
             model.train()
-            permutation = torch.randperm(X_fit_tensor.shape[0], device=self.device)
+            permutation = torch.randperm(
+                X_fit_tensor.shape[0], generator=batch_generator, device="cpu"
+            ).to(self.device)
             try:
                 for start in range(0, X_fit_tensor.shape[0], batch_size):
                     batch = permutation[start : start + batch_size]
@@ -1028,6 +1059,29 @@ def _evaluate_regression_models(
     return results
 
 
+def _safe_evaluate_models(
+    evaluator: Callable[..., dict[str, dict[str, Any]]],
+    estimators: dict[str, Any],
+    *,
+    errors: list[str],
+    **kwargs: Any,
+) -> dict[str, dict[str, Any]]:
+    """Evaluate models independently so one runtime failure is localized."""
+    results: dict[str, dict[str, Any]] = {}
+    for name, estimator in estimators.items():
+        try:
+            results.update(evaluator(estimators={name: estimator}, **kwargs))
+        except Exception as exc:  # optional backend failures must remain local
+            message = f"MLP probe {name!r} failed: {type(exc).__name__}: {exc}"
+            errors.append(message)
+            results[name] = {
+                "status": "runtime_failed",
+                "error": message,
+                "evaluation_mode": kwargs.get("evaluation_mode"),
+            }
+    return results
+
+
 def _bootstrap_indices(
     n_rows: int,
     *,
@@ -1168,10 +1222,17 @@ def _select_best_architecture(
     metrics: tuple[str, ...],
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Select the MLP architecture using conservative ties."""
-    if not architecture_results:
+    usable_results = {
+        name: result
+        for name, result in architecture_results.items()
+        if result.get("status") != "runtime_failed"
+        and result.get("predictions") is not None
+        and _objective_score(result, metrics=metrics) != float("-inf")
+    }
+    if not usable_results:
         return None, None
     ordered = sorted(
-        architecture_results.items(),
+        usable_results.items(),
         key=lambda item: (
             _objective_score(item[1], metrics=metrics),
             -_MLP_HIDDEN_LABELS.index(item[0].replace("mlp_", "")),
@@ -1536,6 +1597,13 @@ def maybe_run_singlelabel_mlp_probes(
     if torch is None:
         payload["status"] = "dependency_unavailable"
         payload["reason"] = "MLP probes require the optional torch extra."
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "mlp_probes",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
         return payload
     resolved_device, fallback_warning = _resolve_device(torch, config.mlp_device)
     payload["backend"] = {
@@ -1564,6 +1632,18 @@ def maybe_run_singlelabel_mlp_probes(
         reason="probe",
         groups=groups,
     )
+    if sample_info.get("support_preserved") is False:
+        payload["status"] = "skipped"
+        payload["reason"] = sample_info.get("skip_reason")
+        payload["sample_info"] = sample_info
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "mlp_probes",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
+        return payload
     dense_info = ensure_dense_or_sample(
         X_used,
         y_used,
@@ -1602,6 +1682,20 @@ def maybe_run_singlelabel_mlp_probes(
         max_folds=budget["cv_folds"],
         groups=dense_groups,
     )
+    if splits is None:
+        payload["status"] = "skipped"
+        payload["reason"] = (
+            "MLP override requires a valid held-out split; no such split was available."
+        )
+        payload["sample_info"] = sample_info
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "mlp_held_out_evaluation",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
+        return payload
     _append_runtime_warnings(
         input_dim=dense_X.shape[1],
         output_dim=int(np.max(dense_y)) + 1,
@@ -1614,11 +1708,15 @@ def maybe_run_singlelabel_mlp_probes(
     comparators: dict[str, Any] = {
         "dummy": DummyClassifier(strategy="prior"),
         "linear": _linear_classifier(dense_X),
-        "knn": KNeighborsClassifier(
-            n_neighbors=min(
-                max(1, dense_y.shape[0] - 1),
-                min(15, max(3, int(np.sqrt(dense_y.shape[0])))),
-            )
+        "knn": _scaled_pipeline(
+            dense_X,
+            KNeighborsClassifier(
+                n_neighbors=min(
+                    max(1, dense_y.shape[0] - 1),
+                    min(15, max(3, int(np.sqrt(dense_y.shape[0])))),
+                )
+            ),
+            name="knn",
         ),
     }
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
@@ -1641,6 +1739,7 @@ def maybe_run_singlelabel_mlp_probes(
             )
     comparators["kernel_approx"] = Pipeline(
         [
+            ("scale_in", StandardScaler()),
             (
                 "rff",
                 RBFSampler(
@@ -1649,6 +1748,7 @@ def maybe_run_singlelabel_mlp_probes(
                     random_state=config.random_state,
                 ),
             ),
+            ("scale_out", StandardScaler()),
             (
                 "clf",
                 SGDClassifier(
@@ -1661,10 +1761,13 @@ def maybe_run_singlelabel_mlp_probes(
             ),
         ]
     )
-    comparator_results = _evaluate_singlelabel_models(
-        dense_X,
-        dense_y,
+    errors = report_context.setdefault("errors", [])
+    comparator_results = _safe_evaluate_models(
+        _evaluate_singlelabel_models,
         comparators,
+        errors=errors,
+        X=dense_X,
+        y=dense_y,
         class_labels=class_labels,
         splits=splits,
         evaluation_mode=evaluation_mode,
@@ -1683,10 +1786,12 @@ def maybe_run_singlelabel_mlp_probes(
         )
         for item in architectures
     }
-    mlp_results = _evaluate_singlelabel_models(
-        dense_X,
-        dense_y,
+    mlp_results = _safe_evaluate_models(
+        _evaluate_singlelabel_models,
         mlp_estimators,
+        errors=errors,
+        X=dense_X,
+        y=dense_y,
         class_labels=class_labels,
         splits=splits,
         evaluation_mode=evaluation_mode,
@@ -1699,6 +1804,13 @@ def maybe_run_singlelabel_mlp_probes(
         config=config,
         groups=dense_groups,
     )
+    if any(result.get("status") == "runtime_failed" for result in mlp_results.values()):
+        recommendation["recommendation_override"] = False
+        recommendation["required_comparators_complete"] = False
+        recommendation["override_reason"] = (
+            "At least one requested MLP architecture failed, so override evidence "
+            "was incomplete."
+        )
     payload.update(
         {
             "status": "completed",
@@ -1746,6 +1858,13 @@ def maybe_run_multilabel_mlp_probes(
     if torch is None:
         payload["status"] = "dependency_unavailable"
         payload["reason"] = "MLP probes require the optional torch extra."
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "multilabel_mlp_probes",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
         return payload
     resolved_device, fallback_warning = _resolve_device(torch, config.mlp_device)
     payload["backend"] = {
@@ -1774,11 +1893,39 @@ def maybe_run_multilabel_mlp_probes(
         reason="probe",
         groups=groups,
     )
+    if sample_info.get("support_preserved") is False:
+        payload["status"] = "skipped"
+        payload["reason"] = sample_info.get("skip_reason")
+        payload["sample_info"] = sample_info
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "multilabel_mlp_probes",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
+        return payload
     groups_used = (
         None
         if groups is None
         else groups[np.asarray(sample_info["indices"], dtype=int)]
     )
+    target_info = ensure_dense_multilabel_target(
+        X_used,
+        Y_used,
+        reason="multilabel_mlp_target",
+        config=config,
+        report_context=report_context,
+        groups=groups_used,
+    )
+    if target_info["skipped"]:
+        payload["status"] = "skipped"
+        payload["reason"] = "Multilabel target exceeds the dense-memory budget."
+        payload["sample_info"] = sample_info
+        return payload
+    X_used = target_info["X"]
+    Y_used = target_info["Y"]
+    groups_used = target_info.get("groups")
     dense_info = _ensure_dense_X_for_multilabel(
         X_used,
         Y_used,
@@ -1815,6 +1962,20 @@ def maybe_run_multilabel_mlp_probes(
         max_folds=budget["cv_folds"],
         groups=dense_groups,
     )
+    if splits is None:
+        payload["status"] = "skipped"
+        payload["reason"] = (
+            "MLP override requires a valid held-out split; no such split was available."
+        )
+        payload["sample_info"] = sample_info
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "multilabel_mlp_held_out_evaluation",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
+        return payload
     _append_runtime_warnings(
         input_dim=dense_X.shape[1],
         output_dim=dense_Y.shape[1],
@@ -1827,11 +1988,15 @@ def maybe_run_multilabel_mlp_probes(
     comparators: dict[str, Any] = {
         "dummy": MultilabelPriorDummy(threshold=0.5),
         "linear": _multilabel_linear_classifier(dense_X, config),
-        "knn": KNeighborsClassifier(
-            n_neighbors=min(
-                max(1, dense_Y.shape[0] - 1),
-                min(15, max(3, int(np.sqrt(dense_Y.shape[0])))),
-            )
+        "knn": _scaled_pipeline(
+            dense_X,
+            KNeighborsClassifier(
+                n_neighbors=min(
+                    max(1, dense_Y.shape[0] - 1),
+                    min(15, max(3, int(np.sqrt(dense_Y.shape[0])))),
+                )
+            ),
+            name="knn",
         ),
     }
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
@@ -1854,6 +2019,7 @@ def maybe_run_multilabel_mlp_probes(
             )
     comparators["kernel_approx"] = Pipeline(
         [
+            ("scale_in", StandardScaler()),
             (
                 "rff",
                 RBFSampler(
@@ -1862,6 +2028,7 @@ def maybe_run_multilabel_mlp_probes(
                     random_state=config.random_state,
                 ),
             ),
+            ("scale_out", StandardScaler()),
             (
                 "clf",
                 OneVsRestClassifier(
@@ -1877,10 +2044,13 @@ def maybe_run_multilabel_mlp_probes(
             ),
         ]
     )
-    comparator_results = _evaluate_multilabel_models(
-        dense_X,
-        dense_Y,
+    errors = report_context.setdefault("errors", [])
+    comparator_results = _safe_evaluate_models(
+        _evaluate_multilabel_models,
         comparators,
+        errors=errors,
+        X=dense_X,
+        Y=dense_Y,
         label_names=label_names,
         splits=splits,
         evaluation_mode=evaluation_mode,
@@ -1899,10 +2069,12 @@ def maybe_run_multilabel_mlp_probes(
         )
         for item in architectures
     }
-    mlp_results = _evaluate_multilabel_models(
-        dense_X,
-        dense_Y,
+    mlp_results = _safe_evaluate_models(
+        _evaluate_multilabel_models,
         mlp_estimators,
+        errors=errors,
+        X=dense_X,
+        Y=dense_Y,
         label_names=label_names,
         splits=splits,
         evaluation_mode=evaluation_mode,
@@ -1916,6 +2088,13 @@ def maybe_run_multilabel_mlp_probes(
         config=config,
         groups=dense_groups,
     )
+    if any(result.get("status") == "runtime_failed" for result in mlp_results.values()):
+        recommendation["recommendation_override"] = False
+        recommendation["required_comparators_complete"] = False
+        recommendation["override_reason"] = (
+            "At least one requested MLP architecture failed, so override evidence "
+            "was incomplete."
+        )
     payload.update(
         {
             "status": "completed",
@@ -1963,6 +2142,13 @@ def maybe_run_regression_mlp_probes(
     if torch is None:
         payload["status"] = "dependency_unavailable"
         payload["reason"] = "MLP probes require the optional torch extra."
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "regression_mlp_probes",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
         return payload
     resolved_device, fallback_warning = _resolve_device(torch, config.mlp_device)
     payload["backend"] = {
@@ -1991,6 +2177,18 @@ def maybe_run_regression_mlp_probes(
         reason="probe",
         groups=groups,
     )
+    if sample_info.get("support_preserved") is False:
+        payload["status"] = "skipped"
+        payload["reason"] = sample_info.get("skip_reason")
+        payload["sample_info"] = sample_info
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "regression_mlp_probes",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
+        return payload
     groups_used = (
         None
         if groups is None
@@ -2034,6 +2232,20 @@ def maybe_run_regression_mlp_probes(
         max_folds=budget["cv_folds"],
         groups=dense_groups,
     )
+    if splits is None:
+        payload["status"] = "skipped"
+        payload["reason"] = (
+            "MLP override requires a valid held-out split; no such split was available."
+        )
+        payload["sample_info"] = sample_info
+        report_context.setdefault("skipped_diagnostics", []).append(
+            {
+                "name": "regression_mlp_held_out_evaluation",
+                "reason": payload["reason"],
+                "severity": "caution",
+            }
+        )
+        return payload
     _append_runtime_warnings(
         input_dim=dense_X.shape[1],
         output_dim=dense_Y.shape[1],
@@ -2045,12 +2257,20 @@ def maybe_run_regression_mlp_probes(
     )
     comparators: dict[str, Any] = {
         "dummy": TargetMeanDummyRegressor(),
-        "linear": Ridge(alpha=1.0, random_state=config.random_state),
-        "knn": KNeighborsRegressor(
-            n_neighbors=min(
-                max(1, dense_Y.shape[0] - 1),
-                min(15, max(3, int(np.sqrt(dense_Y.shape[0])))),
-            )
+        "linear": _scaled_pipeline(
+            dense_X,
+            Ridge(alpha=1.0, random_state=config.random_state),
+            name="reg",
+        ),
+        "knn": _scaled_pipeline(
+            dense_X,
+            KNeighborsRegressor(
+                n_neighbors=min(
+                    max(1, dense_Y.shape[0] - 1),
+                    min(15, max(3, int(np.sqrt(dense_Y.shape[0])))),
+                )
+            ),
+            name="knn",
         ),
     }
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
@@ -2073,6 +2293,7 @@ def maybe_run_regression_mlp_probes(
             )
     comparators["kernel_approx"] = Pipeline(
         [
+            ("scale_in", StandardScaler()),
             (
                 "rff",
                 RBFSampler(
@@ -2081,14 +2302,17 @@ def maybe_run_regression_mlp_probes(
                     random_state=config.random_state,
                 ),
             ),
-            ("scale", StandardScaler()),
+            ("scale_out", StandardScaler()),
             ("reg", Ridge(alpha=1.0, random_state=config.random_state)),
         ]
     )
-    comparator_results = _evaluate_regression_models(
-        dense_X,
-        dense_Y,
+    errors = report_context.setdefault("errors", [])
+    comparator_results = _safe_evaluate_models(
+        _evaluate_regression_models,
         comparators,
+        errors=errors,
+        X=dense_X,
+        Y=dense_Y,
         target_names=target_names,
         splits=splits,
         evaluation_mode=evaluation_mode,
@@ -2107,10 +2331,12 @@ def maybe_run_regression_mlp_probes(
         )
         for item in architectures
     }
-    mlp_results = _evaluate_regression_models(
-        dense_X,
-        dense_Y,
+    mlp_results = _safe_evaluate_models(
+        _evaluate_regression_models,
         mlp_estimators,
+        errors=errors,
+        X=dense_X,
+        Y=dense_Y,
         target_names=target_names,
         splits=splits,
         evaluation_mode=evaluation_mode,
@@ -2124,6 +2350,13 @@ def maybe_run_regression_mlp_probes(
         config=config,
         groups=dense_groups,
     )
+    if any(result.get("status") == "runtime_failed" for result in mlp_results.values()):
+        recommendation["recommendation_override"] = False
+        recommendation["required_comparators_complete"] = False
+        recommendation["override_reason"] = (
+            "At least one requested MLP architecture failed, so override evidence "
+            "was incomplete."
+        )
     payload.update(
         {
             "status": "completed",

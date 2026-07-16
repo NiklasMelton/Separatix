@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 from scipy import sparse
 from sklearn.preprocessing import LabelEncoder
-from sklearn.utils.multiclass import type_of_target
 
 from separatix.grouping import (
     multilabel_group_support,
@@ -36,6 +35,7 @@ class ValidatedInput:
     evaluable_classes_: np.ndarray
     evaluable_groups: np.ndarray | None
     evaluable_mask: np.ndarray
+    warnings: list[str]
 
 
 @dataclass
@@ -155,13 +155,26 @@ def _validate_feature_matrix(X: Any) -> tuple[Any, bool]:
         X = X.tocsr()
         if X.ndim != 2:
             raise ValueError("X must be two-dimensional.")
+        if X.shape[1] == 0:
+            raise ValueError("X must contain at least one feature column.")
+        if np.issubdtype(X.dtype, np.complexfloating):
+            raise ValueError("X must contain real-valued features, not complex values.")
+        if not np.issubdtype(X.dtype, np.number):
+            try:
+                X = X.astype(float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("X could not be converted to floating point.") from exc
         if np.isnan(X.data).any() or not np.isfinite(X.data).all():
             raise ValueError("X contains non-finite values.")
-        return X, True
+        return X.astype(float, copy=False), True
 
     X_array = np.asarray(X)
     if X_array.ndim != 2:
         raise ValueError("X must be two-dimensional.")
+    if X_array.shape[1] == 0:
+        raise ValueError("X must contain at least one feature column.")
+    if np.issubdtype(X_array.dtype, np.complexfloating):
+        raise ValueError("X must contain real-valued features, not complex values.")
     if not np.issubdtype(X_array.dtype, np.number):
         try:
             X_array = X_array.astype(float)
@@ -198,51 +211,39 @@ def _validate_multilabel_target(y: Any) -> tuple[Any, np.ndarray, bool]:
 
 def validate_inputs(X: Any, y: Any, *, groups: Any = None) -> ValidatedInput:
     """Validate features and labels for classification diagnostics."""
-    X = _coerce_pandas(X)
-    if not sparse.issparse(X):
-        X = np.asarray(X)
+    X, is_sparse = _validate_feature_matrix(X)
     y_array = _coerce_pandas(y)
     y_array = np.asarray(y_array)
 
     if y_array.ndim != 1:
         raise ValueError("y must be one-dimensional.")
-    if sparse.issparse(X):
-        X = X.tocsr()
-    elif X.ndim != 2:
-        raise ValueError("X must be two-dimensional.")
     if X.shape[0] != y_array.shape[0]:
         raise ValueError("X and y must have matching sample counts.")
-
-    target_type = type_of_target(y_array)
-    if target_type in {"continuous", "continuous-multioutput", "multilabel-indicator"}:
-        raise ValueError(
-            "Only categorical single-output classification targets are supported."
-        )
-    if target_type == "multiclass-multioutput":
-        raise ValueError("Multioutput classification is not supported.")
-
-    if sparse.issparse(X):
-        if np.isnan(X.data).any() or not np.isfinite(X.data).all():
-            raise ValueError("X contains non-finite values.")
-    else:
-        if not np.issubdtype(X.dtype, np.number):
-            try:
-                X = X.astype(float)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("X could not be converted to floating point.") from exc
-        else:
-            X = X.astype(float, copy=False)
-        if not np.isfinite(X).all():
-            raise ValueError("X contains non-finite values.")
-
-    if np.isnan(y_array).any() if np.issubdtype(y_array.dtype, np.number) else False:
-        raise ValueError("y contains NaN values.")
+    if np.issubdtype(y_array.dtype, np.complexfloating):
+        raise ValueError("y must contain real-valued or string class labels.")
+    if np.issubdtype(y_array.dtype, np.number) and not np.isfinite(y_array).all():
+        raise ValueError("y contains non-finite values.")
+    if y_array.dtype == object and any(
+        value is None
+        or (isinstance(value, (float, np.floating)) and not np.isfinite(value))
+        for value in y_array.tolist()
+    ):
+        raise ValueError("y contains missing or non-finite values.")
 
     encoder = LabelEncoder()
     y_encoded = encoder.fit_transform(y_array)
     classes_ = encoder.classes_
     if classes_.shape[0] < 2:
         raise ValueError("At least two classes are required.")
+    warnings: list[str] = []
+    if np.issubdtype(y_array.dtype, np.number):
+        unique_ratio = classes_.shape[0] / max(1, y_array.shape[0])
+        if classes_.shape[0] >= 20 and unique_ratio >= 0.2:
+            warnings.append(
+                "The numeric classification target has high cardinality; use "
+                "target_mode='regression' if these values represent a continuous "
+                "response rather than class identifiers."
+            )
     group_info = validate_groups(groups, n_samples=int(X.shape[0]))
     grouping_summary = summarize_groups(group_info.encoded if group_info else None)
 
@@ -288,7 +289,7 @@ def validate_inputs(X: Any, y: Any, *, groups: Any = None) -> ValidatedInput:
         y_encoded=y_encoded,
         labels_original=y_array,
         classes_=classes_,
-        is_sparse=sparse.issparse(X),
+        is_sparse=is_sparse,
         n_samples=int(X.shape[0]),
         n_features=int(X.shape[1]),
         n_classes=int(classes_.shape[0]),
@@ -298,6 +299,7 @@ def validate_inputs(X: Any, y: Any, *, groups: Any = None) -> ValidatedInput:
         evaluable_classes_=evaluable_classes,
         evaluable_groups=evaluable_groups,
         evaluable_mask=evaluable_mask,
+        warnings=warnings,
     )
 
 
@@ -380,6 +382,8 @@ def validate_regression_inputs(
     """Validate features and continuous targets for regression diagnostics."""
     X_checked, is_sparse_X = _validate_feature_matrix(X)
     if sparse.issparse(y):
+        if np.issubdtype(y.dtype, np.complexfloating):
+            raise ValueError("regression y must be real-valued, not complex.")
         y_raw = y.toarray()
     else:
         y_raw = _coerce_pandas(y)
@@ -399,6 +403,8 @@ def validate_regression_inputs(
         except (TypeError, ValueError) as exc:
             raise ValueError("regression y must be numeric.") from exc
     else:
+        if np.issubdtype(Y.dtype, np.complexfloating):
+            raise ValueError("regression y must be real-valued, not complex.")
         Y = Y.astype(float, copy=False)
     if not np.isfinite(Y).all():
         raise ValueError("regression y contains non-finite values.")
@@ -420,6 +426,12 @@ def validate_regression_inputs(
 
     group_info = validate_groups(groups, n_samples=int(X_checked.shape[0]))
     grouping_summary = summarize_groups(group_info.encoded if group_info else None)
+    if group_info is not None:
+        grouping_summary["supervised_evaluation_mode"] = (
+            "group_cross_validation"
+            if group_info.n_groups >= 2
+            else "group_split_unavailable"
+        )
     return ValidatedRegressionInput(
         X=X_checked,
         Y=Y,

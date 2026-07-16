@@ -1,22 +1,26 @@
-[tool.poetry]
+[project]
 name = "separatix"
 version = "0.1.0a4"
-description = "Diagnostic profiling of labeled embeddings for classification model complexity guidance."
-authors = ["Niklas Melton <niklas@example.com>"]
+description = "Diagnostic profiling of supervised feature spaces before model training."
+authors = [{ name = "Niklas Melton", email = "niklas@example.com" }]
 readme = "README.md"
 license = "MIT"
-packages = [{ include = "separatix" }]
+requires-python = ">=3.9,<3.15"
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "scikit-learn>=1.2",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.9,<3.15"
-numpy = ">=1.23"
-scipy = ">=1.9"
-scikit-learn = ">=1.2"
-pandas = { version = ">=1.5", optional = true }
-matplotlib = { version = ">=3.6", optional = true }
-ripser = { version = ">=0.6", optional = true }
-iterative-stratification = { version = ">=0.1.9", optional = true }
-torch = { version = ">=2.1", optional = true }
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]
+tda = ["ripser>=0.6"]
+multilabel = ["iterative-stratification>=0.1.9"]
+mlp = ["torch>=2.1"]
+examples = ["matplotlib>=3.6", "pandas>=1.5"]
+
+[tool.poetry]
+packages = [{ include = "separatix" }]
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=7"
@@ -25,13 +29,6 @@ ruff = ">=0.5"
 mypy = ">=1"
 build = ">=1"
 twine = ">=5"
-
-[tool.poetry.extras]
-pandas = ["pandas"]
-tda = ["ripser"]
-multilabel = ["iterative-stratification"]
-mlp = ["torch"]
-examples = ["matplotlib", "pandas"]
 
 [tool.ruff]
 line-length = 88

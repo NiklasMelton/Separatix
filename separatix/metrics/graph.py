@@ -11,6 +11,7 @@ from sklearn.neighbors import NearestNeighbors
 
 from separatix.config import ProfilerConfig
 from separatix.constants import BUDGETS
+from separatix.densify import ensure_dense_multilabel_target
 from separatix.sampling import cap_multilabel_samples_for_budget, cap_samples_for_budget
 
 
@@ -37,23 +38,43 @@ def _knn_graph(
     if n_rows < 3:
         return None
     k = min(n_rows - 1, 10)
-    query_neighbors = n_rows if cross_group and groups is not None else k + 1
-    nn = NearestNeighbors(n_neighbors=query_neighbors)
-    nn.fit(X_boundary)
-    indices = nn.kneighbors(
-        X_boundary, n_neighbors=query_neighbors, return_distance=False
-    )
     rows: list[int] = []
     cols: list[int] = []
-    for row_idx in range(n_rows):
-        neighbors = indices[row_idx]
-        mask = neighbors != row_idx
-        if cross_group and groups is not None:
-            mask &= groups[neighbors] != groups[row_idx]
-        neighbors = neighbors[mask][:k]
-        for col_idx in neighbors.tolist():
-            rows.append(row_idx)
-            cols.append(col_idx)
+    if cross_group and groups is not None:
+        for group_id in np.unique(groups):
+            query_rows = np.flatnonzero(groups == group_id)
+            fit_rows = np.flatnonzero(groups != group_id)
+            if fit_rows.size == 0:
+                continue
+            n_neighbors = min(k, fit_rows.size)
+            model = NearestNeighbors(n_neighbors=n_neighbors).fit(X_boundary[fit_rows])
+            for start in range(0, query_rows.size, 256):
+                batch = query_rows[start : start + 256]
+                local = model.kneighbors(
+                    X_boundary[batch],
+                    n_neighbors=n_neighbors,
+                    return_distance=False,
+                )
+                for position, row_idx in enumerate(batch.tolist()):
+                    for col_idx in fit_rows[local[position]].tolist():
+                        rows.append(row_idx)
+                        cols.append(col_idx)
+    else:
+        query_neighbors = k + 1
+        nn = NearestNeighbors(n_neighbors=query_neighbors).fit(X_boundary)
+        for start in range(0, n_rows, 256):
+            batch = np.arange(start, min(start + 256, n_rows), dtype=int)
+            indices = nn.kneighbors(
+                X_boundary[batch],
+                n_neighbors=query_neighbors,
+                return_distance=False,
+            )
+            for position, row_idx in enumerate(batch.tolist()):
+                neighbors = indices[position]
+                neighbors = neighbors[neighbors != row_idx][:k]
+                for col_idx in neighbors.tolist():
+                    rows.append(row_idx)
+                    cols.append(col_idx)
     if not rows:
         return None
     data = np.ones(len(rows), dtype=int)
@@ -199,6 +220,14 @@ def compute_graph_fragmentation(
         if groups_boundary is not None
         else None
     )
+    if sample_info.get("support_preserved") is False or X_boundary.shape[0] < 3:
+        return {
+            **_empty_fragmentation(
+                int(X_boundary.shape[0]),
+                warning=str(sample_info.get("skip_reason")),
+            ),
+            "sampling": sample_info,
+        }
     row_level = _fragmentation_summary(X_boundary, y_boundary)
     if groups_used is None:
         return {
@@ -257,7 +286,7 @@ def _multilabel_edge_metrics(
     jaccard = np.divide(
         intersection,
         union,
-        out=np.zeros_like(intersection, dtype=float),
+        out=np.ones_like(intersection, dtype=float),
         where=union > 0,
     )
     hamming = np.mean(first != second, axis=1)
@@ -349,6 +378,7 @@ def compute_multilabel_graph_fragmentation(
     boundary: dict[str, Any],
     *,
     config: ProfilerConfig,
+    report_context: dict[str, Any] | None = None,
     groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Compute graph fragmentation summaries over multilabel boundary candidates."""
@@ -367,12 +397,38 @@ def compute_multilabel_graph_fragmentation(
         reason="boundary",
         groups=groups_boundary,
     )
-    Y_dense = _dense_multilabel_matrix(Y_boundary)
+    if sample_info.get("support_preserved") is False or X_boundary.shape[0] < 3:
+        return {
+            **_multilabel_fragmentation_summary(
+                np.zeros((0, 1)), np.zeros((0, 1), dtype=int)
+            ),
+            "sampling": sample_info,
+            "warning": sample_info.get("skip_reason"),
+        }
     groups_used = (
         groups_boundary[np.asarray(sample_info["indices"], dtype=int)]
         if groups_boundary is not None
         else None
     )
+    dense_info = ensure_dense_multilabel_target(
+        X_boundary,
+        Y_boundary,
+        reason="multilabel_graph_target",
+        config=config,
+        report_context=report_context if report_context is not None else {},
+        groups=groups_used,
+    )
+    if dense_info["skipped"]:
+        return {
+            **_multilabel_fragmentation_summary(
+                np.zeros((0, 1)), np.zeros((0, 1), dtype=int)
+            ),
+            "sampling": sample_info,
+            "warning": "multilabel target exceeds dense-memory budget",
+        }
+    X_boundary = dense_info["X"]
+    Y_dense = _dense_multilabel_matrix(dense_info["Y"])
+    groups_used = dense_info.get("groups")
     row_level = _multilabel_fragmentation_summary(X_boundary, Y_dense)
     if groups_used is None:
         return {

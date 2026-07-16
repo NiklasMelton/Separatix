@@ -5,6 +5,8 @@ import pytest
 from scipy import sparse
 
 from separatix import DiagnosticReport, diagnose
+from separatix.constants import INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY
+from separatix.metrics.neighborhood import _regression_summary
 
 
 def _linear_regression_data() -> tuple[np.ndarray, np.ndarray]:
@@ -16,8 +18,47 @@ def _linear_regression_data() -> tuple[np.ndarray, np.ndarray]:
 
 def test_regression_requires_explicit_target_mode() -> None:
     X, y = _linear_regression_data()
-    with pytest.raises(ValueError, match="categorical single-output"):
-        diagnose(X, y, return_report=True, random_state=0)
+    report = diagnose(X, y, return_report=True, random_state=0)
+    assert report.class_summary["n_classes"] == y.shape[0]
+    assert any("high cardinality" in warning for warning in report.warnings)
+
+
+def test_one_group_regression_never_uses_resubstitution_for_guidance() -> None:
+    X, y = _linear_regression_data()
+    report = diagnose(
+        X,
+        y,
+        groups=np.zeros(X.shape[0], dtype=int),
+        target_mode="regression",
+        return_report=True,
+        topology="off",
+        random_state=0,
+    )
+    assert report.metrics["probes"]["linear"]["evaluation_mode"] == (
+        "group_split_unavailable"
+    )
+    assert report.grouping["effective_supervised_evaluation_mode"] == (
+        "group_split_unavailable"
+    )
+    assert report.recommendation == (
+        INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY
+    )
+
+
+def test_multitarget_neighborhood_is_invariant_to_target_units() -> None:
+    rng = np.random.default_rng(15)
+    X = rng.normal(size=(80, 3))
+    Y = np.column_stack([X[:, 0], X[:, 1]])
+    base = _regression_summary(X, Y, groups=None, cross_group=False)
+    rescaled = _regression_summary(
+        X,
+        np.column_stack([Y[:, 0], 10_000.0 * Y[:, 1]]),
+        groups=None,
+        cross_group=False,
+    )
+    assert rescaled["mean_normalized_neighbor_target_distance"] == pytest.approx(
+        base["mean_normalized_neighbor_target_distance"]
+    )
 
 
 def test_single_target_regression_returns_report_and_json() -> None:

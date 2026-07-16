@@ -32,7 +32,7 @@ The current implementation follows this sequence:
      graph fragmentation, optional topology
    - regression: probe models, target-neighborhood smoothness, and optional
      hard-subset topology; classification boundary and graph-fragmentation
-     diagnostics are reported as skipped
+     diagnostics are reported as not applicable
 5. Build probe-family evidence and uncertainty estimates from the probe-model
    results.
 6. Convert the raw diagnostic outputs into a smaller set of normalized summary
@@ -54,9 +54,9 @@ supporting diagnostics. Optional regression topology is descriptive evidence
 only and cannot alter the recommendation or confidence.
 
 The profiler implementation that wires these stages together lives in
-[separatix/profiler.py](/Users/niklasmelton/code/Separatix/separatix/profiler.py),
+[separatix/profiler.py](../separatix/profiler.py),
 and the final score aggregation and recommendation logic lives in
-[separatix/recommendation/engine.py](/Users/niklasmelton/code/Separatix/separatix/recommendation/engine.py).
+[separatix/recommendation/engine.py](../separatix/recommendation/engine.py).
 
 ## Diagnostic Families
 
@@ -98,6 +98,11 @@ instead of materializing every pairwise interaction.
 The probe family is not treated as a model-selection tournament. Instead, probe
 performance is used as evidence about the shape of the decision surface:
 
+All non-dummy probe preprocessing is fitted within each validation fold.
+Dense inputs are centered and scaled, sparse inputs are scaled without
+centering, and random-feature maps run after scaling. Geometry and topology
+remain descriptions of the original input coordinates.
+
 - If the linear probe is close to the strongest observed family, that supports
   a linear recommendation.
 - If nonlinear probes clearly improve over linear, that supports a nonlinear
@@ -121,6 +126,9 @@ For multilabel targets, the current summary logic uses signals such as:
 - mean neighbor Hamming distance
 - local label entropy
 - local label-cardinality variation
+
+Local label entropy is the arithmetic mean across every evaluated label column;
+columns with zero entropy remain in the denominator instead of being dropped.
 
 High local mixing is interpreted as overlap or ambiguity in the labeled feature
 space.

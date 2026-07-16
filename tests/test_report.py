@@ -1,3 +1,6 @@
+import json
+
+import numpy as np
 from sklearn.datasets import make_blobs
 
 from separatix import diagnose
@@ -111,3 +114,36 @@ def test_smooth_probe_skip_is_serialized() -> None:
         item["name"] == "smooth_nonlinear_probe" for item in report.skipped_diagnostics
     )
     assert isinstance(report.to_json(), str)
+
+
+def test_report_json_replaces_nonfinite_values_with_null() -> None:
+    X = np.ones((20, 1), dtype=float)
+    y = np.asarray([0, 1] * 10)
+    report = diagnose(X, y, return_report=True, topology="off", random_state=0)
+    report.metrics["injected_nonfinite"] = {
+        "nan": float("nan"),
+        "positive_infinity": float("inf"),
+        "zero_dimensional_array": np.asarray(float("-inf")),
+        "tuple_value": (1.0, float("nan")),
+    }
+    payload = report.to_json(terse=False)
+    parsed = json.loads(payload)
+    assert parsed["metrics"]["injected_nonfinite"] == {
+        "nan": None,
+        "positive_infinity": None,
+        "zero_dimensional_array": None,
+        "tuple_value": [1.0, None],
+    }
+    assert "NaN" not in payload
+    assert "Infinity" not in payload
+
+
+def test_constant_one_feature_geometry_is_finite_and_degenerate() -> None:
+    X = np.ones((30, 1), dtype=float)
+    y = np.asarray([0, 1] * 15)
+    report = diagnose(X, y, return_report=True, topology="off", random_state=0)
+    geometry = report.metrics["geometry"]
+    assert geometry["effective_rank_estimate"] == 0.0
+    assert geometry["intrinsic_dimension_proxy"] == 0.0
+    assert geometry["degenerate_geometry"] is True
+    json.loads(report.to_json())
