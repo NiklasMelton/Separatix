@@ -40,6 +40,14 @@ jobs:
       - name: Install dependencies
         run: poetry install --with dev
 
+      - name: Run release validation
+        run: |
+          poetry run pytest
+          poetry run ruff check separatix tests
+          poetry run ruff format --check separatix tests
+          poetry run mypy separatix
+          poetry check
+
       - name: Build package
         run: poetry build
 

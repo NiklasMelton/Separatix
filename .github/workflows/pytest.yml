@@ -39,14 +39,19 @@ jobs:
       - name: Run Ruff format check
         run: poetry run ruff format --check separatix tests
 
+      - name: Run mypy
+        run: poetry run mypy separatix
+
+      - name: Validate package metadata
+        run: poetry check
+
   pytest:
-    name: pytest (${{ matrix.suite-name }}, py${{ matrix.python-version }})
+    name: pytest (base, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
-        suite-name: ["base", "tda", "multilabel", "tda+multilabel"]
 
     steps:
       - name: Check out repository
@@ -68,35 +73,127 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: poetry
 
-      - name: Select suite configuration
-        id: suite
-        shell: bash
-        run: |
-          case "${{ matrix.suite-name }}" in
-            base)
-              echo "install_args=" >> "$GITHUB_OUTPUT"
-              echo "pytest_command=poetry run pytest" >> "$GITHUB_OUTPUT"
-              ;;
-            tda)
-              echo "install_args=-E tda" >> "$GITHUB_OUTPUT"
-              echo "pytest_command=poetry run pytest tests/test_optional_topology.py tests/test_multilabel_topology.py tests/test_report.py" >> "$GITHUB_OUTPUT"
-              ;;
-            multilabel)
-              echo "install_args=-E multilabel" >> "$GITHUB_OUTPUT"
-              echo "pytest_command=poetry run pytest tests/test_multilabel_api.py tests/test_multilabel_boundary_graph.py tests/test_multilabel_sampling.py tests/test_multilabel_validation.py tests/test_recommendation_engine.py" >> "$GITHUB_OUTPUT"
-              ;;
-            tda+multilabel)
-              echo "install_args=-E tda -E multilabel" >> "$GITHUB_OUTPUT"
-              echo "pytest_command=poetry run pytest tests/test_multilabel_api.py tests/test_multilabel_topology.py tests/test_multilabel_sampling.py tests/test_recommendation_engine.py" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Unknown pytest suite: ${{ matrix.suite-name }}" >&2
-              exit 1
-              ;;
-          esac
-
       - name: Install dependencies
-        run: poetry install --with dev ${{ steps.suite.outputs.install_args }}
+        run: poetry install --with dev
 
       - name: Run pytest
-        run: ${{ steps.suite.outputs.pytest_command }}
+        run: poetry run pytest
+
+  optional-extra:
+    name: ${{ matrix.name }} (py3.12)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: pandas input
+            extra: pandas
+            tests: tests/test_validation.py tests/test_api.py
+          - name: iterative multilabel stratification
+            extra: multilabel
+            tests: tests/test_multilabel_sampling.py
+          - name: persistent topology
+            extra: tda
+            tests: tests/test_optional_topology.py tests/test_multilabel_topology.py
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: latest
+
+      - name: Configure Poetry cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: poetry
+
+      - name: Install optional dependency
+        run: poetry install --with dev -E ${{ matrix.extra }}
+
+      - name: Assert iterative stratifier is installed
+        if: matrix.extra == 'multilabel'
+        run: poetry run python -c "from iterstrat.ml_stratifiers import MultilabelStratifiedKFold; assert MultilabelStratifiedKFold"
+
+      - name: Run optional-path tests
+        run: poetry run pytest ${{ matrix.tests }}
+
+  cpu-mlp-extra:
+    name: CPU-only MLP extra (py3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: latest
+
+      - name: Configure Poetry cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: poetry
+
+      - name: Install base dependencies
+        run: poetry install --with dev
+
+      - name: Install CPU-only PyTorch
+        run: poetry run pip install 'torch>=2.1' --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run MLP tests
+        run: poetry run pytest tests/test_mlp_probes.py
+
+  all-extras-coverage:
+    name: all extras and coverage (py3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: latest
+
+      - name: Configure Poetry cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: poetry
+
+      - name: Install base dependencies
+        run: poetry install --with dev
+
+      - name: Install CPU-only PyTorch
+        run: poetry run pip install 'torch>=2.1' --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install remaining optional dependencies
+        run: poetry install --with dev -E pandas -E tda -E multilabel -E examples
+
+      - name: Run all tests with coverage
+        run: poetry run pytest --cov=separatix --cov-report=term-missing --cov-fail-under=80
+
+      - name: Enforce optional MLP coverage
+        run: poetry run coverage report --include='separatix/models/mlp.py' --fail-under=70
