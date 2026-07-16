@@ -29,16 +29,19 @@ jobs:
       - name: Install Poetry
         uses: abatilo/actions-poetry@v4
         with:
-          poetry-version: latest
+          poetry-version: "2.1.3"
 
       - name: Configure Poetry cache
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: poetry
+          cache-dependency-path: poetry.lock
 
       - name: Install dependencies
-        run: poetry install --with dev
+        run: |
+          poetry config installer.only-binary numpy,scipy,scikit-learn
+          poetry sync --with dev
 
       - name: Run release validation
         run: |

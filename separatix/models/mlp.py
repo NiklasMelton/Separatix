@@ -99,11 +99,31 @@ _MLP_RUNTIME_WORK_WARNING = 1e12
 
 
 def _torch_module() -> Any | None:
-    """Return torch when installed, otherwise None."""
-    spec = find_spec("torch")
-    if spec is None:
+    """Return a usable torch installation, otherwise None."""
+    try:
+        spec = find_spec("torch")
+    except (ImportError, ValueError):
         return None
-    return importlib.import_module("torch")
+    if spec is None or spec.loader is None:
+        return None
+    try:
+        torch = importlib.import_module("torch")
+    except Exception:
+        return None
+    required_api = (
+        "Tensor",
+        "cuda",
+        "manual_seed",
+        "nn",
+        "no_grad",
+        "optim",
+        "random",
+        "tensor",
+        "utils",
+    )
+    if any(not hasattr(torch, attribute) for attribute in required_api):
+        return None
+    return torch
 
 
 def _default_mlp_artifacts(config: ProfilerConfig) -> dict[str, Any]:

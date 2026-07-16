@@ -555,3 +555,15 @@ def test_torch_mlp_does_not_mutate_numpy_global_rng() -> None:
     torch.random.set_rng_state(torch_state)
     expected_torch = torch.rand(5)
     assert torch.equal(observed_torch, expected_torch)
+
+
+def test_torch_module_rejects_incomplete_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubSpec:
+        loader = object()
+
+    monkeypatch.setattr(mlp_module, "find_spec", lambda _name: StubSpec())
+    monkeypatch.setattr(mlp_module.importlib, "import_module", lambda _name: object())
+
+    assert mlp_module._torch_module() is None

@@ -22,16 +22,19 @@ jobs:
       - name: Install Poetry
         uses: abatilo/actions-poetry@v4
         with:
-          poetry-version: latest
+          poetry-version: "2.1.3"
 
       - name: Configure Poetry cache
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: poetry
+          cache-dependency-path: poetry.lock
 
       - name: Install dependencies
-        run: poetry install --with dev
+        run: |
+          poetry config installer.only-binary numpy,scipy,scikit-learn
+          poetry sync --with dev
 
       - name: Run Ruff lint
         run: poetry run ruff check separatix tests
@@ -65,16 +68,22 @@ jobs:
       - name: Install Poetry
         uses: abatilo/actions-poetry@v4
         with:
-          poetry-version: latest
+          poetry-version: "2.1.3"
 
       - name: Configure Poetry cache
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: poetry
+          cache-dependency-path: poetry.lock
 
       - name: Install dependencies
-        run: poetry install --with dev
+        run: |
+          poetry config installer.only-binary numpy,scipy,scikit-learn
+          poetry sync --with dev
+
+      - name: Verify scientific stack
+        run: poetry run python -c "import numpy, scipy, scipy.spatial.transform, sklearn; print('numpy={}, scipy={}, scikit-learn={}'.format(numpy.__version__, scipy.__version__, sklearn.__version__))"
 
       - name: Run pytest
         run: poetry run pytest
@@ -108,16 +117,19 @@ jobs:
       - name: Install Poetry
         uses: abatilo/actions-poetry@v4
         with:
-          poetry-version: latest
+          poetry-version: "2.1.3"
 
       - name: Configure Poetry cache
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: poetry
+          cache-dependency-path: poetry.lock
 
       - name: Install optional dependency
-        run: poetry install --with dev -E ${{ matrix.extra }}
+        run: |
+          poetry config installer.only-binary numpy,scipy,scikit-learn
+          poetry sync --with dev -E ${{ matrix.extra }}
 
       - name: Assert iterative stratifier is installed
         if: matrix.extra == 'multilabel'
@@ -142,16 +154,19 @@ jobs:
       - name: Install Poetry
         uses: abatilo/actions-poetry@v4
         with:
-          poetry-version: latest
+          poetry-version: "2.1.3"
 
       - name: Configure Poetry cache
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: poetry
+          cache-dependency-path: poetry.lock
 
       - name: Install base dependencies
-        run: poetry install --with dev
+        run: |
+          poetry config installer.only-binary numpy,scipy,scikit-learn
+          poetry sync --with dev
 
       - name: Install CPU-only PyTorch
         run: poetry run pip install 'torch>=2.1' --index-url https://download.pytorch.org/whl/cpu
@@ -175,22 +190,22 @@ jobs:
       - name: Install Poetry
         uses: abatilo/actions-poetry@v4
         with:
-          poetry-version: latest
+          poetry-version: "2.1.3"
 
       - name: Configure Poetry cache
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: poetry
+          cache-dependency-path: poetry.lock
 
-      - name: Install base dependencies
-        run: poetry install --with dev
+      - name: Install dependencies except PyTorch
+        run: |
+          poetry config installer.only-binary numpy,scipy,scikit-learn
+          poetry sync --with dev -E pandas -E tda -E multilabel -E examples
 
       - name: Install CPU-only PyTorch
         run: poetry run pip install 'torch>=2.1' --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Install remaining optional dependencies
-        run: poetry install --with dev -E pandas -E tda -E multilabel -E examples
 
       - name: Run all tests with coverage
         run: poetry run pytest --cov=separatix --cov-report=term-missing --cov-fail-under=80
