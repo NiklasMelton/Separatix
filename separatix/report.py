@@ -59,7 +59,27 @@ def _serialize_value(value: Any, *, terse: bool) -> Any:
 
 @dataclass
 class DiagnosticReport:
-    """Structured diagnostic report produced by separatix."""
+    """Structured, JSON-serializable result produced by separatix.
+
+    Attributes:
+        recommendation: Stable machine-readable recommendation label.
+        recommendation_text: Plain-language recommendation and rationale.
+        confidence: Coarse evidence-quality level.
+        metrics: Raw and derived diagnostic-family evidence.
+        scores: Normalized summary scores where applicable.
+        interpretations: Human-readable descriptions of report evidence.
+        decision_path: Ordered recommendation gates and decisions.
+        warnings: Non-fatal warnings raised during the run.
+        errors: Captured diagnostic errors.
+        skipped_diagnostics: Diagnostics omitted with structured reasons.
+        preprocessing: Probe and geometry preprocessing metadata.
+        sampling: Sampling metadata by diagnostic family.
+        densification_events: Dense conversion, sampling, and skip events.
+        class_summary: Classification, multilabel, or regression target summary.
+        grouping: Group-validation and group-split metadata.
+        runtime: Runtime measurements.
+        config: Effective profiler configuration.
+    """
 
     recommendation: str
     recommendation_text: str
@@ -80,14 +100,29 @@ class DiagnosticReport:
     config: dict[str, Any]
 
     def to_dict(self, *, terse: bool = True) -> dict[str, Any]:
-        """Return a JSON-serializable dictionary representation."""
+        """Return a JSON-serializable dictionary representation.
+
+        Args:
+            terse: Prune large row-level arrays before copying the report.
+
+        Returns:
+            A dictionary containing only standard JSON-compatible values.
+        """
         return {
             field.name: _serialize_value(getattr(self, field.name), terse=terse)
             for field in fields(self)
         }
 
     def to_json(self, *, indent: int = 2, terse: bool = True) -> str:
-        """Return a JSON string representation of the report."""
+        """Return a standards-compliant JSON representation.
+
+        Args:
+            indent: Number of spaces used for indentation.
+            terse: Prune large row-level arrays before serialization.
+
+        Returns:
+            JSON text with non-finite numeric values represented as ``null``.
+        """
         return json.dumps(
             self.to_dict(terse=terse),
             indent=indent,

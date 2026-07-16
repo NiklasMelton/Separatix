@@ -15,7 +15,12 @@ def _is_positive_int(value: object) -> bool:
 
 @dataclass
 class ProfilerConfig:
-    """Configuration for the separatix diagnostic profiler."""
+    """Validated configuration for the separatix diagnostic profiler.
+
+    The functional :func:`separatix.diagnose` API exposes the commonly used
+    fields directly. :class:`separatix.ComplexityProfiler` additionally exposes
+    ``min_dense_samples`` and ``n_jobs``.
+    """
 
     budget: Literal["fast", "standard", "extended"] = "standard"
     topology: Literal["off", "auto", "graph", "persistent"] = "auto"
@@ -81,5 +86,5 @@ class ProfilerConfig:
             raise ValueError("mlp_max_parameters must be positive when provided.")
 
     def to_dict(self) -> dict[str, object]:
-        """Return a JSON-serializable configuration dictionary."""
+        """Return all configuration fields as a JSON-serializable dictionary."""
         return asdict(self)

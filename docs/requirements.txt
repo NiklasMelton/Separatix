@@ -1,0 +1,4 @@
+# Keep these constraints aligned with the Poetry "docs" dependency group.
+sphinx>=7.2,<9
+furo>=2024.8.6
+myst-parser>=3,<5

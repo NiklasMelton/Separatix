@@ -77,7 +77,35 @@ def _reliability_skip_count(entries: list[dict[str, Any]]) -> int:
 
 
 class ComplexityProfiler:
-    """Diagnostic profiler for labeled embedding classification problems."""
+    """Estimator-style diagnostic profiler for supervised feature spaces.
+
+    Diagnostics run during :meth:`fit` and are stored in :attr:`report_`. The
+    class intentionally has no ``predict`` method because it recommends coarse
+    model-family complexity rather than fitting a production predictor.
+
+    Args:
+        target_mode: Target routing mode. Regression is explicit opt-in.
+        multilabel_stratification: Multilabel split strategy.
+        budget: Diagnostic effort level.
+        topology: Optional topology behavior.
+        densify_policy: Behavior for dense-only diagnostics.
+        max_dense_mb: Hard estimated memory limit for dense operations.
+        max_samples: Optional hard row cap for diagnostic sampling.
+        min_dense_samples: Minimum useful dense sample size after subsampling.
+        random_state: Seed for deterministic sampling and randomized probes.
+        warn_on_densify: Emit runtime warnings for densification events.
+        n_jobs: Optional parallel job count forwarded to supported estimators.
+        mlp_probes: Enable conditional feed-forward MLP probes.
+        mlp_device: Device policy for optional MLP probes.
+        mlp_trigger_skill_threshold: Minimum simpler-probe skill for the MLP
+            trigger policy.
+        mlp_min_improvement: Minimum held-out MLP gain required for an override.
+        mlp_max_parameters: Optional hard MLP parameter cap.
+
+    Attributes:
+        config: Validated profiler configuration.
+        report_: Most recently fitted report, or ``None`` before :meth:`fit`.
+    """
 
     def __init__(
         self,
@@ -125,7 +153,20 @@ class ComplexityProfiler:
         self.report_: DiagnosticReport | None = None
 
     def fit(self, X: Any, y: Any, *, groups: Any = None) -> ComplexityProfiler:
-        """Run diagnostics and store the resulting report in report_."""
+        """Run diagnostics and store the resulting report.
+
+        Args:
+            X: Numeric feature matrix with one row per sample.
+            y: Targets accepted by the configured target mode.
+            groups: Optional group identifier for every sample.
+
+        Returns:
+            This fitted profiler instance.
+
+        Raises:
+            ValueError: If inputs are invalid or incompatible with the target
+                mode.
+        """
         if self.config.target_mode == "regression":
             return self._fit_regression(X, y, groups=groups)
         if self.config.target_mode == "multilabel":
@@ -623,13 +664,21 @@ class ComplexityProfiler:
         return self
 
     def report(self) -> DiagnosticReport:
-        """Return the fitted DiagnosticReport."""
+        """Return the fitted diagnostic report.
+
+        Raises:
+            ValueError: If :meth:`fit` has not been called successfully.
+        """
         if self.report_ is None:
             raise ValueError("Profiler has not been fit yet.")
         return self.report_
 
     def recommendation(self) -> str:
-        """Return the plain-text recommendation."""
+        """Return the fitted report's plain-text recommendation.
+
+        Raises:
+            ValueError: If :meth:`fit` has not been called successfully.
+        """
         return self.report().recommendation_text
 
     @staticmethod
