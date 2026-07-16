@@ -42,8 +42,8 @@ so broken references or invalid source documentation fail CI.
 ## Pull requests and required checks
 
 Pull requests should normally target `develop`; release integration can target
-`main`. Repository administrators should configure branch rules for both
-branches to require the status check named **Documentation / Sphinx build** in
+`main`. Repository administrators require passing statuses on **Documentation / 
+Sphinx build** checks in
 addition to the regular test and style checks. The workflow runs on every pull
 request targeting either protected branch.
 
