@@ -22,8 +22,22 @@ def _is_missing_group_value(value: Any) -> bool:
     """Return whether one group value should be treated as missing."""
     if value is None:
         return True
+    if value is np.ma.masked:
+        return True
+    if isinstance(value, (np.datetime64, np.timedelta64)):
+        return bool(np.isnat(value))
     if isinstance(value, (float, np.floating)):
         return bool(np.isnan(value))
+    try:
+        unequal = value != value
+        if isinstance(unequal, (bool, np.bool_)):
+            return bool(unequal)
+        # pandas.NA and similar scalar sentinels propagate an indeterminate
+        # comparison result instead of a bool.
+        if type(unequal).__name__ == "NAType":
+            return True
+    except (TypeError, ValueError):
+        return True
     return False
 
 
@@ -111,16 +125,14 @@ def multilabel_group_support(
     groups: np.ndarray,
 ) -> np.ndarray:
     """Return a mask of multilabel columns with group support on both sides."""
-    if sparse.issparse(Y):
-        Y_dense = Y.toarray()
-    else:
-        Y_dense = np.asarray(Y)
-    if Y_dense.ndim == 1:
-        Y_dense = Y_dense.reshape(-1, 1)
-    positive_group_counts = np.zeros(Y_dense.shape[1], dtype=int)
-    negative_group_counts = np.zeros(Y_dense.shape[1], dtype=int)
-    for label_idx in range(Y_dense.shape[1]):
-        positives = Y_dense[:, label_idx] > 0
+    n_labels = int(Y.shape[1])
+    positive_group_counts = np.zeros(n_labels, dtype=int)
+    negative_group_counts = np.zeros(n_labels, dtype=int)
+    for label_idx in range(n_labels):
+        if sparse.issparse(Y):
+            positives = np.asarray(Y[:, label_idx].toarray()).ravel() > 0
+        else:
+            positives = np.asarray(Y)[:, label_idx] > 0
         positive_group_counts[label_idx] = int(np.unique(groups[positives]).shape[0])
         negative_group_counts[label_idx] = int(np.unique(groups[~positives]).shape[0])
     return (positive_group_counts >= 2) & (negative_group_counts >= 2)

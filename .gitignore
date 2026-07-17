@@ -19,6 +19,7 @@ htmlcov/
 build/
 dist/
 site/
+docs/_build/
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
@@ -30,4 +31,3 @@ pip-wheel-metadata/
 
 # Jupyter
 .ipynb_checkpoints/
-

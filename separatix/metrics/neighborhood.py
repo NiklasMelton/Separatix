@@ -9,7 +9,11 @@ from scipy import sparse
 from sklearn.neighbors import NearestNeighbors
 
 from separatix.config import ProfilerConfig
-from separatix.densify import ensure_dense_or_sample, ensure_dense_or_sample_regression
+from separatix.densify import (
+    ensure_dense_multilabel_target,
+    ensure_dense_or_sample,
+    ensure_dense_or_sample_regression,
+)
 from separatix.models.probes import _ensure_dense_X_for_multilabel
 from separatix.sampling import (
     cap_multilabel_samples_for_budget,
@@ -22,6 +26,73 @@ def _slice_rows(X: Any, indices: np.ndarray) -> Any:
     return X[indices, :] if sparse.issparse(X) else X[indices]
 
 
+def _bounded_neighbor_rows(
+    X_fit: Any,
+    *,
+    k: int,
+    groups: np.ndarray | None,
+    cross_group: bool,
+    return_distance: bool,
+    batch_size: int = 256,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Query only the required neighbors, in bounded batches."""
+    n_samples = int(X_fit.shape[0])
+    neighbor_rows = [np.array([], dtype=int) for _ in range(n_samples)]
+    distance_rows = [np.array([], dtype=float) for _ in range(n_samples)]
+    if cross_group and groups is not None:
+        for group_id in np.unique(groups):
+            query_indices = np.flatnonzero(groups == group_id)
+            fit_indices = np.flatnonzero(groups != group_id)
+            if fit_indices.size == 0:
+                continue
+            n_query = min(k, fit_indices.size)
+            model = NearestNeighbors(n_neighbors=n_query).fit(
+                _slice_rows(X_fit, fit_indices)
+            )
+            for start in range(0, query_indices.size, batch_size):
+                batch = query_indices[start : start + batch_size]
+                if return_distance:
+                    distances, local = model.kneighbors(
+                        _slice_rows(X_fit, batch),
+                        n_neighbors=n_query,
+                        return_distance=True,
+                    )
+                else:
+                    local = model.kneighbors(
+                        _slice_rows(X_fit, batch),
+                        n_neighbors=n_query,
+                        return_distance=False,
+                    )
+                    distances = np.zeros_like(local, dtype=float)
+                for position, row_index in enumerate(batch.tolist()):
+                    neighbor_rows[row_index] = fit_indices[local[position]]
+                    distance_rows[row_index] = distances[position]
+        return neighbor_rows, distance_rows
+
+    n_query = min(n_samples, k + 1)
+    model = NearestNeighbors(n_neighbors=n_query).fit(X_fit)
+    all_indices = np.arange(n_samples, dtype=int)
+    for start in range(0, n_samples, batch_size):
+        batch = all_indices[start : start + batch_size]
+        if return_distance:
+            distances, local = model.kneighbors(
+                _slice_rows(X_fit, batch),
+                n_neighbors=n_query,
+                return_distance=True,
+            )
+        else:
+            local = model.kneighbors(
+                _slice_rows(X_fit, batch),
+                n_neighbors=n_query,
+                return_distance=False,
+            )
+            distances = np.zeros_like(local, dtype=float)
+        for position, row_index in enumerate(batch.tolist()):
+            neighbor_rows[row_index] = local[position]
+            distance_rows[row_index] = distances[position]
+    return neighbor_rows, distance_rows
+
+
 def _fit_neighbors(
     X_used: Any,
     y_like: np.ndarray,
@@ -30,13 +101,13 @@ def _fit_neighbors(
     config: ProfilerConfig,
     report_context: dict[str, Any],
     groups: np.ndarray | None = None,
-) -> tuple[Any, np.ndarray | None]:
+) -> tuple[Any, np.ndarray, np.ndarray | None, np.ndarray]:
     """Return a dense or sparse neighbor-fit matrix and aligned groups."""
     if not sparse.issparse(X_used):
-        return X_used, groups
+        return X_used, y_like, groups, np.arange(y_like.shape[0], dtype=int)
     try:
         NearestNeighbors(n_neighbors=2).fit(X_used)
-        return X_used, groups
+        return X_used, y_like, groups, np.arange(y_like.shape[0], dtype=int)
     except TypeError:
         dense_info = ensure_dense_or_sample(
             X_used,
@@ -47,8 +118,13 @@ def _fit_neighbors(
             groups=groups,
         )
         if dense_info["skipped"]:
-            return None, None
-        return dense_info["X"], dense_info.get("groups")
+            return None, y_like, None, np.array([], dtype=int)
+        return (
+            dense_info["X"],
+            np.asarray(dense_info["y"]),
+            dense_info.get("groups"),
+            np.asarray(dense_info["indices"], dtype=int),
+        )
 
 
 def _fit_regression_neighbors(
@@ -59,13 +135,13 @@ def _fit_regression_neighbors(
     config: ProfilerConfig,
     report_context: dict[str, Any],
     groups: np.ndarray | None = None,
-) -> tuple[Any, np.ndarray | None]:
+) -> tuple[Any, np.ndarray, np.ndarray | None, np.ndarray]:
     """Return a neighbor-fit matrix for regression diagnostics."""
     if not sparse.issparse(X_used):
-        return X_used, groups
+        return X_used, Y_used, groups, np.arange(Y_used.shape[0], dtype=int)
     try:
         NearestNeighbors(n_neighbors=2).fit(X_used)
-        return X_used, groups
+        return X_used, Y_used, groups, np.arange(Y_used.shape[0], dtype=int)
     except TypeError:
         dense_info = ensure_dense_or_sample_regression(
             X_used,
@@ -76,8 +152,13 @@ def _fit_regression_neighbors(
             groups=groups,
         )
         if dense_info["skipped"]:
-            return None, None
-        return dense_info["X"], dense_info.get("groups")
+            return None, Y_used, None, np.array([], dtype=int)
+        return (
+            dense_info["X"],
+            np.asarray(dense_info["y"], dtype=float),
+            dense_info.get("groups"),
+            np.asarray(dense_info["indices"], dtype=int),
+        )
 
 
 def _normalize_entropy(counts: np.ndarray) -> float:
@@ -112,10 +193,13 @@ def _singlelabel_summary(
             "local_ambiguity": [],
         }
 
-    n_query = n_samples if cross_group and groups is not None else k + 1
-    nn = NearestNeighbors(n_neighbors=n_query)
-    nn.fit(X_fit)
-    distances, indices = nn.kneighbors(X_fit, n_neighbors=n_query, return_distance=True)
+    indices, distances = _bounded_neighbor_rows(
+        X_fit,
+        k=k,
+        groups=groups,
+        cross_group=cross_group,
+        return_distance=True,
+    )
     entropies: list[float] = []
     ambiguities: list[float] = []
     same_class: list[float] = []
@@ -183,9 +267,15 @@ def compute_neighborhood_diagnostics(
         reason="neighbors",
         groups=groups,
     )
+    if sample_info.get("support_preserved") is False or X_used.shape[0] == 0:
+        return {
+            "sampling": sample_info,
+            "row_indices": [],
+            "skipped_reason": sample_info.get("skip_reason"),
+        }
     sample_indices = np.asarray(sample_info["indices"], dtype=int)
     groups_used = groups[sample_indices] if groups is not None else None
-    X_fit, dense_groups = _fit_neighbors(
+    X_fit, y_used, dense_groups, dense_indices = _fit_neighbors(
         X_used,
         y_used,
         reason="neighborhood_diagnostics",
@@ -199,6 +289,12 @@ def compute_neighborhood_diagnostics(
             "row_indices": sample_indices.tolist(),
             "skipped_reason": "dense conversion unavailable",
         }
+    sample_indices = sample_indices[dense_indices]
+    sample_info = {
+        **sample_info,
+        "n_used": int(sample_indices.size),
+        "indices": sample_indices.tolist(),
+    }
     row_level = _singlelabel_summary(
         X_fit,
         y_used,
@@ -246,11 +342,17 @@ def _regression_summary(
             "local_target_distance": [],
             "local_normalized_target_distance": [],
         }
-    n_query = n_samples if cross_group and groups is not None else k + 1
-    nn = NearestNeighbors(n_neighbors=n_query)
-    nn.fit(X_fit)
-    _, indices = nn.kneighbors(X_fit, n_neighbors=n_query, return_distance=True)
-    centered = Y_used - np.mean(Y_used, axis=0)
+    indices, _ = _bounded_neighbor_rows(
+        X_fit,
+        k=k,
+        groups=groups,
+        cross_group=cross_group,
+        return_distance=False,
+    )
+    target_std = np.std(Y_used, axis=0)
+    target_std = np.where(target_std > 1e-12, target_std, 1.0)
+    standardized_targets = (Y_used - np.mean(Y_used, axis=0)) / target_std
+    centered = standardized_targets
     global_distances = np.linalg.norm(centered, axis=1)
     global_scale = float(np.sqrt(np.mean(global_distances**2)))
     global_scale = max(global_scale, 1e-12)
@@ -263,7 +365,7 @@ def _regression_summary(
         neigh = neigh[mask][:k]
         if neigh.size == 0:
             continue
-        target_delta = Y_used[neigh] - Y_used[row_i]
+        target_delta = standardized_targets[neigh] - standardized_targets[row_i]
         local_distances.append(float(np.mean(np.linalg.norm(target_delta, axis=1))))
     if not local_distances:
         return {
@@ -283,6 +385,7 @@ def _regression_summary(
         "high_discontinuity_fraction": float(np.mean(normalized >= 1.0)),
         "local_target_distance": local_distances,
         "local_normalized_target_distance": normalized.tolist(),
+        "target_scaling": "per_target_standard_deviation",
     }
 
 
@@ -302,9 +405,15 @@ def compute_regression_neighborhood_diagnostics(
         reason="neighbors",
         groups=groups,
     )
+    if sample_info.get("support_preserved") is False or X_used.shape[0] == 0:
+        return {
+            "sampling": sample_info,
+            "row_indices": [],
+            "skipped_reason": sample_info.get("skip_reason"),
+        }
     sample_indices = np.asarray(sample_info["indices"], dtype=int)
     groups_used = groups[sample_indices] if groups is not None else None
-    X_fit, dense_groups = _fit_regression_neighbors(
+    X_fit, Y_used, dense_groups, dense_indices = _fit_regression_neighbors(
         X_used,
         Y_used,
         reason="regression_neighborhood_diagnostics",
@@ -318,6 +427,12 @@ def compute_regression_neighborhood_diagnostics(
             "row_indices": sample_indices.tolist(),
             "skipped_reason": "dense conversion unavailable",
         }
+    sample_indices = sample_indices[dense_indices]
+    sample_info = {
+        **sample_info,
+        "n_used": int(sample_indices.size),
+        "indices": sample_indices.tolist(),
+    }
     row_level = _regression_summary(
         X_fit,
         np.asarray(Y_used, dtype=float),
@@ -358,11 +473,10 @@ def _dense_multilabel_matrix(Y: Any) -> np.ndarray:
 def _label_entropy(values: np.ndarray) -> float:
     """Return mean binary entropy across label columns."""
     probs = values.mean(axis=0)
+    ent = np.zeros_like(probs, dtype=float)
     mask = (probs > 0) & (probs < 1)
-    if not np.any(mask):
-        return 0.0
     p = probs[mask]
-    ent = -(p * np.log(p) + (1.0 - p) * np.log(1.0 - p))
+    ent[mask] = -(p * np.log(p) + (1.0 - p) * np.log(1.0 - p))
     return float(np.mean(ent / np.log(2.0)))
 
 
@@ -384,16 +498,19 @@ def _multilabel_summary(
             "high_entropy_label_fraction": 0.0,
             "label_cardinality_local_std": 0.0,
             "all_zero_neighbor_pair_fraction": 0.0,
-            "empty_union_jaccard_convention": "empty unions are scored as 0.0",
+            "empty_union_jaccard_convention": "empty unions are scored as 1.0",
             "local_neighbor_jaccard": [],
             "local_neighbor_hamming_distance": [],
             "local_label_entropy": [],
             "local_cardinality_std": [],
         }
-    n_query = Y_dense.shape[0] if cross_group and groups is not None else k + 1
-    nn = NearestNeighbors(n_neighbors=n_query)
-    nn.fit(X_fit)
-    indices = nn.kneighbors(X_fit, n_neighbors=n_query, return_distance=False)
+    indices, _ = _bounded_neighbor_rows(
+        X_fit,
+        k=k,
+        groups=groups,
+        cross_group=cross_group,
+        return_distance=False,
+    )
     jaccards: list[float] = []
     hamming_values: list[float] = []
     local_entropies: list[float] = []
@@ -422,7 +539,7 @@ def _multilabel_summary(
             pair_count += 1
             if not np.any(union):
                 empty_union_count += 1
-                score = 0.0
+                score = 1.0
             else:
                 score = float(np.sum(intersection) / np.sum(union))
             row_jaccards.append(score)
@@ -440,7 +557,7 @@ def _multilabel_summary(
             "high_entropy_label_fraction": 0.0,
             "label_cardinality_local_std": 0.0,
             "all_zero_neighbor_pair_fraction": 0.0,
-            "empty_union_jaccard_convention": "empty unions are scored as 0.0",
+            "empty_union_jaccard_convention": "empty unions are scored as 1.0",
             "local_neighbor_jaccard": [],
             "local_neighbor_hamming_distance": [],
             "local_label_entropy": [],
@@ -461,7 +578,7 @@ def _multilabel_summary(
         "all_zero_neighbor_pair_fraction": float(
             empty_union_count / max(1, pair_count)
         ),
-        "empty_union_jaccard_convention": "empty unions are scored as 0.0",
+        "empty_union_jaccard_convention": "empty unions are scored as 1.0",
         "local_neighbor_jaccard": local_jaccard_means,
         "local_neighbor_hamming_distance": local_hamming_means,
         "local_label_entropy": local_entropies,
@@ -485,8 +602,33 @@ def compute_multilabel_neighborhood_diagnostics(
         reason="neighbors",
         groups=groups,
     )
+    if sample_info.get("support_preserved") is False or X_used.shape[0] == 0:
+        return {
+            "sampling": sample_info,
+            "row_indices": [],
+            "skipped_reason": sample_info.get("skip_reason"),
+        }
     sample_indices = np.asarray(sample_info["indices"], dtype=int)
     groups_used = groups[sample_indices] if groups is not None else None
+    target_info = ensure_dense_multilabel_target(
+        X_used,
+        Y_used,
+        reason="multilabel_neighborhood_target",
+        config=config,
+        report_context=report_context,
+        groups=groups_used,
+    )
+    if target_info["skipped"]:
+        return {
+            "sampling": sample_info,
+            "row_indices": [],
+            "skipped_reason": "multilabel target exceeds dense-memory budget",
+        }
+    relative = np.asarray(target_info["indices"], dtype=int)
+    sample_indices = sample_indices[relative]
+    X_used = target_info["X"]
+    Y_used = target_info["Y"]
+    groups_used = target_info.get("groups")
     Y_dense = _dense_multilabel_matrix(Y_used)
     if sparse.issparse(X_used):
         dense_info = _ensure_dense_X_for_multilabel(
@@ -506,8 +648,14 @@ def compute_multilabel_neighborhood_diagnostics(
         X_fit = dense_info["X"]
         Y_dense = _dense_multilabel_matrix(dense_info["Y"])
         groups_used = dense_info.get("groups")
+        sample_indices = sample_indices[np.asarray(dense_info["indices"], dtype=int)]
     else:
         X_fit = X_used
+    sample_info = {
+        **sample_info,
+        "n_used": int(sample_indices.size),
+        "indices": sample_indices.tolist(),
+    }
     row_level = _multilabel_summary(
         X_fit, Y_dense, groups=groups_used, cross_group=False
     )

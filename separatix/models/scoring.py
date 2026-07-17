@@ -34,9 +34,20 @@ from separatix.sampling import choose_multilabel_holdout, grouped_singlelabel_cv
 def _prepared_estimator(estimator: Any, train_size: int) -> Any:
     """Clone an estimator and shrink kNN neighborhoods to fit the training fold."""
     fitted = clone(estimator)
-    if hasattr(fitted, "get_params") and "n_neighbors" in fitted.get_params():
-        n_neighbors = int(fitted.get_params()["n_neighbors"])
-        fitted.set_params(n_neighbors=max(1, min(n_neighbors, train_size)))
+    if hasattr(fitted, "get_params"):
+        params = fitted.get_params()
+        neighbor_keys = [
+            key
+            for key in params
+            if key == "n_neighbors" or key.endswith("__n_neighbors")
+        ]
+        if neighbor_keys:
+            fitted.set_params(
+                **{
+                    key: max(1, min(int(params[key]), train_size))
+                    for key in neighbor_keys
+                }
+            )
     return fitted
 
 
@@ -59,17 +70,17 @@ def choose_cv(
     if min_count >= 5:
         n_splits = min(max_folds, 5)
         return StratifiedKFold(
-            n_splits=n_splits, shuffle=True, random_state=0
+            n_splits=n_splits, shuffle=True, random_state=random_state
         ), "stratified"
     if min_count >= 3:
         n_splits = min(max_folds, 3)
         return StratifiedKFold(
-            n_splits=n_splits, shuffle=True, random_state=0
+            n_splits=n_splits, shuffle=True, random_state=random_state
         ), "stratified"
     if min_count >= 2:
         n_splits = min(max_folds, 2)
         return StratifiedKFold(
-            n_splits=n_splits, shuffle=True, random_state=0
+            n_splits=n_splits, shuffle=True, random_state=random_state
         ), "stratified"
     return None, "resubstitution_low_reliability"
 
@@ -135,7 +146,10 @@ def summarize_stability(
         splitter.split(X, y, groups) if groups is not None else splitter.split(X, y)
     )
     for train_idx, test_idx in split_iter:
-        if np.unique(y[train_idx]).shape[0] < np.unique(y).shape[0]:
+        if (
+            np.unique(y[train_idx]).shape[0] < np.unique(y).shape[0]
+            or np.unique(y[test_idx]).shape[0] < np.unique(y).shape[0]
+        ):
             continue
         fitted = _prepared_estimator(estimator, len(train_idx)).fit(
             X[train_idx], y[train_idx]
@@ -339,7 +353,7 @@ def _micro_f1(Y_true: np.ndarray, Y_pred: np.ndarray) -> float:
 def _sample_f1_and_jaccard(
     Y_true: np.ndarray, Y_pred: np.ndarray
 ) -> tuple[float, float]:
-    """Return sample-averaged F1 and Jaccard with empty unions scored as 0."""
+    """Return sample metrics, treating two empty label sets as agreement."""
     true_bool = Y_true.astype(bool)
     pred_bool = Y_pred.astype(bool)
     intersections = np.logical_and(true_bool, pred_bool).sum(axis=1).astype(float)
@@ -356,7 +370,7 @@ def _sample_f1_and_jaccard(
     sample_jaccard = np.divide(
         intersections,
         unions,
-        out=np.zeros_like(intersections, dtype=float),
+        out=np.ones_like(intersections, dtype=float),
         where=unions > 0,
     )
     return float(np.mean(sample_f1)), float(np.mean(sample_jaccard))

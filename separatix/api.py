@@ -29,7 +29,55 @@ def diagnose(
     mlp_min_improvement: float = 0.02,
     mlp_max_parameters: int | None = None,
 ) -> str | DiagnosticReport:
-    """Diagnose apparent supervised complexity from embeddings and targets."""
+    """Diagnose apparent supervised complexity from features and targets.
+
+    Args:
+        X: Numeric feature matrix with shape ``(n_samples, n_features)``. Dense
+            NumPy arrays, SciPy sparse matrices, and pandas DataFrames are
+            accepted.
+        y: Target values with one row per sample. The accepted shape and values
+            depend on ``target_mode``.
+        groups: Optional group identifier for every row. Groups are kept intact
+            during sampling and held-out evaluation.
+        return_report: Return a structured :class:`DiagnosticReport` instead of
+            the plain-text recommendation.
+        target_mode: Target routing mode. Regression is explicit opt-in, while
+            auto mode detects unambiguous two-dimensional multilabel indicators.
+        multilabel_stratification: Multilabel split strategy. Auto mode uses
+            iterative stratification when installed and otherwise falls back to
+            deterministic heuristic stratification.
+        budget: Diagnostic effort level.
+        topology: Optional topology behavior. Graph summaries do not require the
+            persistent-homology extra.
+        densify_policy: Behavior when a dense-only diagnostic meets sparse or
+            over-budget data.
+        max_dense_mb: Hard estimated memory limit for dense operations.
+        max_samples: Optional hard row cap for diagnostic sampling.
+        random_state: Seed used by sampling, splits, and randomized probes.
+        warn_on_densify: Emit runtime warnings when densification or dense
+            subsampling occurs.
+        mlp_probes: Enable conditional feed-forward MLP probes. PyTorch must be
+            installed through the ``mlp`` extra.
+        mlp_device: Device policy for optional MLP probes.
+        mlp_trigger_skill_threshold: Minimum simpler-probe skill used by the MLP
+            trigger policy.
+        mlp_min_improvement: Minimum held-out MLP improvement required for an
+            override.
+        mlp_max_parameters: Optional hard cap on the MLP parameter count.
+
+    Returns:
+        A plain-text recommendation by default, or a
+        :class:`DiagnosticReport` when ``return_report=True``.
+
+    Raises:
+        ValueError: If inputs or configuration are invalid.
+        MemoryError: If a required dense operation exceeds ``max_dense_mb``
+            under the ``"fail"`` densification policy.
+
+    Note:
+        This function provides coarse diagnostic guidance. It does not select
+        or fit a final predictive model.
+    """
     profiler = ComplexityProfiler(
         target_mode=target_mode,
         multilabel_stratification=multilabel_stratification,

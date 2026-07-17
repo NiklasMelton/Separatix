@@ -63,8 +63,49 @@ from separatix.validation import (
 )
 
 
+def _deduplicate_messages(messages: list[str]) -> list[str]:
+    """Return messages in first-seen order without duplicates."""
+    return list(dict.fromkeys(messages))
+
+
+def _reliability_skip_count(entries: list[dict[str, Any]]) -> int:
+    """Count only skips that can affect recommendation reliability."""
+    return sum(
+        entry.get("status") not in {"not_applicable", "informational"}
+        for entry in entries
+    )
+
+
 class ComplexityProfiler:
-    """Diagnostic profiler for labeled embedding classification problems."""
+    """Estimator-style diagnostic profiler for supervised feature spaces.
+
+    Diagnostics run during :meth:`fit` and are stored in :attr:`report_`. The
+    class intentionally has no ``predict`` method because it recommends coarse
+    model-family complexity rather than fitting a production predictor.
+
+    Args:
+        target_mode: Target routing mode. Regression is explicit opt-in.
+        multilabel_stratification: Multilabel split strategy.
+        budget: Diagnostic effort level.
+        topology: Optional topology behavior.
+        densify_policy: Behavior for dense-only diagnostics.
+        max_dense_mb: Hard estimated memory limit for dense operations.
+        max_samples: Optional hard row cap for diagnostic sampling.
+        min_dense_samples: Minimum useful dense sample size after subsampling.
+        random_state: Seed for deterministic sampling and randomized probes.
+        warn_on_densify: Emit runtime warnings for densification events.
+        n_jobs: Optional parallel job count forwarded to supported estimators.
+        mlp_probes: Enable conditional feed-forward MLP probes.
+        mlp_device: Device policy for optional MLP probes.
+        mlp_trigger_skill_threshold: Minimum simpler-probe skill for the MLP
+            trigger policy.
+        mlp_min_improvement: Minimum held-out MLP gain required for an override.
+        mlp_max_parameters: Optional hard MLP parameter cap.
+
+    Attributes:
+        config: Validated profiler configuration.
+        report_: Most recently fitted report, or ``None`` before :meth:`fit`.
+    """
 
     def __init__(
         self,
@@ -112,7 +153,20 @@ class ComplexityProfiler:
         self.report_: DiagnosticReport | None = None
 
     def fit(self, X: Any, y: Any, *, groups: Any = None) -> ComplexityProfiler:
-        """Run diagnostics and store the resulting report in report_."""
+        """Run diagnostics and store the resulting report.
+
+        Args:
+            X: Numeric feature matrix with one row per sample.
+            y: Targets accepted by the configured target mode.
+            groups: Optional group identifier for every sample.
+
+        Returns:
+            This fitted profiler instance.
+
+        Raises:
+            ValueError: If inputs are invalid or incompatible with the target
+                mode.
+        """
         if self.config.target_mode == "regression":
             return self._fit_regression(X, y, groups=groups)
         if self.config.target_mode == "multilabel":
@@ -129,7 +183,8 @@ class ComplexityProfiler:
         start = time.perf_counter()
         validated = validate_inputs(X, y, groups=groups)
         report_context: dict[str, Any] = {
-            "warnings": [],
+            "warnings": list(validated.warnings),
+            "errors": [],
             "skipped_diagnostics": [],
             "densification_events": [],
         }
@@ -140,17 +195,36 @@ class ComplexityProfiler:
             classes=validated.classes_,
             is_sparse=validated.is_sparse,
         )
+        X_evaluable = (
+            validated.X[validated.evaluable_mask]
+            if not sparse.issparse(validated.X)
+            else validated.X[validated.evaluable_mask, :]
+        )
+        if not np.all(validated.evaluable_mask):
+            report_context["skipped_diagnostics"].append(
+                {
+                    "name": "unsupported_group_classes",
+                    "reason": (
+                        "At least one class cannot be evaluated across distinct "
+                        "groups, so model-family guidance for the full task is unsafe."
+                    ),
+                    "severity": "blocking",
+                    "count": len(
+                        validated.grouping_summary.get(
+                            "skipped_singlelabel_classes", []
+                        )
+                    ),
+                }
+            )
         geometry = compute_geometry_diagnostics(
-            validated.X,
+            X_evaluable,
             validated.evaluable_y_encoded,
             config=self.config,
             report_context=report_context,
             groups=validated.evaluable_groups,
         )
         probes = run_model_probes(
-            validated.X[validated.evaluable_mask]
-            if not sparse.issparse(validated.X)
-            else validated.X[validated.evaluable_mask, :],
+            X_evaluable,
             validated.evaluable_y_encoded,
             config=self.config,
             report_context=report_context,
@@ -159,9 +233,7 @@ class ComplexityProfiler:
         )
         baseline = summarize_probe_family(probes)
         neighborhood = compute_neighborhood_diagnostics(
-            validated.X[validated.evaluable_mask]
-            if not sparse.issparse(validated.X)
-            else validated.X[validated.evaluable_mask, :],
+            X_evaluable,
             validated.evaluable_y_encoded,
             config=self.config,
             report_context=report_context,
@@ -171,18 +243,14 @@ class ComplexityProfiler:
             validated.evaluable_y_encoded, neighborhood, probes
         )
         graph = compute_graph_fragmentation(
-            validated.X[validated.evaluable_mask]
-            if not sparse.issparse(validated.X)
-            else validated.X[validated.evaluable_mask, :],
+            X_evaluable,
             validated.evaluable_y_encoded,
             boundary,
             config=self.config,
             groups=validated.evaluable_groups,
         )
         topology = compute_topology_diagnostics(
-            validated.X[validated.evaluable_mask]
-            if not sparse.issparse(validated.X)
-            else validated.X[validated.evaluable_mask, :],
+            X_evaluable,
             validated.evaluable_y_encoded,
             boundary,
             geometry,
@@ -199,15 +267,8 @@ class ComplexityProfiler:
             "graph": graph,
             "topology": topology,
         }
-        scores = compute_scores(
-            metrics,
-            skipped_count=len(report_context["skipped_diagnostics"]),
-            warning_count=len(report_context["warnings"]),
-        )
         mlp_evidence = maybe_run_singlelabel_mlp_probes(
-            validated.X[validated.evaluable_mask]
-            if not sparse.issparse(validated.X)
-            else validated.X[validated.evaluable_mask, :],
+            X_evaluable,
             validated.evaluable_y_encoded,
             config=self.config,
             metrics=metrics,
@@ -220,6 +281,18 @@ class ComplexityProfiler:
         metrics["mlp_recommendation_evidence"] = {
             key: value for key, value in mlp_evidence.items() if key != "trigger"
         }
+        report_context["warnings"] = _deduplicate_messages(report_context["warnings"])
+        metrics["quality_context"] = {
+            "skipped_diagnostics": report_context["skipped_diagnostics"],
+            "errors": report_context["errors"],
+        }
+        scores = compute_scores(
+            metrics,
+            skipped_count=_reliability_skip_count(
+                report_context["skipped_diagnostics"]
+            ),
+            warning_count=len(report_context["warnings"]),
+        )
         recommendation, confidence, decision_path, interpretations = (
             make_recommendation(scores, metrics)
         )
@@ -232,6 +305,9 @@ class ComplexityProfiler:
             "min_class_count": min(audit["class_counts"].values()),
             "max_class_count": max(audit["class_counts"].values()),
         }
+        validated.grouping_summary["effective_supervised_evaluation_mode"] = probes[
+            "linear"
+        ].get("evaluation_mode")
         report = DiagnosticReport(
             recommendation=recommendation,
             recommendation_text="",
@@ -241,7 +317,7 @@ class ComplexityProfiler:
             interpretations=interpretations,
             decision_path=decision_path,
             warnings=report_context["warnings"],
-            errors=[],
+            errors=report_context["errors"],
             skipped_diagnostics=report_context["skipped_diagnostics"],
             preprocessing=build_preprocessing_summary(
                 validated.X, is_sparse=validated.is_sparse
@@ -270,6 +346,7 @@ class ComplexityProfiler:
         validated = validate_regression_inputs(X, y, groups=groups)
         report_context: dict[str, Any] = {
             "warnings": list(validated.warnings),
+            "errors": [],
             "skipped_diagnostics": [],
             "densification_events": [],
         }
@@ -317,6 +394,7 @@ class ComplexityProfiler:
         )
         topology_context: dict[str, Any] = {
             "warnings": [],
+            "errors": [],
             "skipped_diagnostics": [],
             "densification_events": [],
         }
@@ -329,23 +407,12 @@ class ComplexityProfiler:
             report_context=topology_context,
         )
         skipped_common = {
+            "status": "not_applicable",
             "skipped_reason": (
                 "Classification boundary diagnostics are not used for continuous "
                 "regression targets."
-            )
+            ),
         }
-        report_context["skipped_diagnostics"].extend(
-            [
-                {
-                    "name": "regression_boundary_candidates",
-                    "reason": skipped_common["skipped_reason"],
-                },
-                {
-                    "name": "regression_graph_fragmentation",
-                    "reason": skipped_common["skipped_reason"],
-                },
-            ]
-        )
         metrics = {
             "audit": audit,
             "geometry": geometry,
@@ -356,11 +423,6 @@ class ComplexityProfiler:
             "graph": skipped_common,
             "topology": topology,
         }
-        scores = compute_regression_scores(
-            metrics,
-            skipped_count=len(report_context["skipped_diagnostics"]),
-            warning_count=len(report_context["warnings"]),
-        )
         mlp_evidence = maybe_run_regression_mlp_probes(
             validated.X,
             Y_usable,
@@ -375,6 +437,18 @@ class ComplexityProfiler:
         metrics["mlp_recommendation_evidence"] = {
             key: value for key, value in mlp_evidence.items() if key != "trigger"
         }
+        report_context["warnings"] = _deduplicate_messages(report_context["warnings"])
+        metrics["quality_context"] = {
+            "skipped_diagnostics": report_context["skipped_diagnostics"],
+            "errors": report_context["errors"],
+        }
+        scores = compute_regression_scores(
+            metrics,
+            skipped_count=_reliability_skip_count(
+                report_context["skipped_diagnostics"]
+            ),
+            warning_count=len(report_context["warnings"]),
+        )
         recommendation, confidence, decision_path, interpretations = (
             make_regression_recommendation(scores, metrics)
         )
@@ -385,6 +459,7 @@ class ComplexityProfiler:
         report_context["densification_events"].extend(
             topology_context["densification_events"]
         )
+        report_context["errors"].extend(topology_context["errors"])
         target_summary = {
             "target_type": "regression",
             "n_targets": validated.n_targets,
@@ -393,6 +468,9 @@ class ComplexityProfiler:
             "constant_target_count": int(np.sum(~validated.usable_target_mask)),
             "target_variance_summary": audit["target_variance_summary"],
         }
+        validated.grouping_summary["effective_supervised_evaluation_mode"] = probes[
+            "linear"
+        ].get("evaluation_mode")
         report = DiagnosticReport(
             recommendation=recommendation,
             recommendation_text="",
@@ -402,7 +480,7 @@ class ComplexityProfiler:
             interpretations=interpretations,
             decision_path=decision_path,
             warnings=report_context["warnings"],
-            errors=[],
+            errors=report_context["errors"],
             skipped_diagnostics=report_context["skipped_diagnostics"],
             preprocessing=build_preprocessing_summary(
                 validated.X,
@@ -437,6 +515,7 @@ class ComplexityProfiler:
         validated = validate_multilabel_inputs(X, y, groups=groups)
         report_context: dict[str, Any] = {
             "warnings": list(validated.warnings),
+            "errors": [],
             "skipped_diagnostics": [],
             "densification_events": [],
         }
@@ -490,6 +569,7 @@ class ComplexityProfiler:
             Y_usable,
             boundary,
             config=self.config,
+            report_context=report_context,
             groups=validated.groups,
         )
         topology = compute_multilabel_topology_diagnostics(
@@ -509,11 +589,6 @@ class ComplexityProfiler:
             "graph": graph,
             "topology": topology,
         }
-        scores = compute_multilabel_scores(
-            metrics,
-            skipped_count=len(report_context["skipped_diagnostics"]),
-            warning_count=len(report_context["warnings"]),
-        )
         mlp_evidence = maybe_run_multilabel_mlp_probes(
             validated.X,
             Y_usable,
@@ -528,6 +603,18 @@ class ComplexityProfiler:
         metrics["mlp_recommendation_evidence"] = {
             key: value for key, value in mlp_evidence.items() if key != "trigger"
         }
+        report_context["warnings"] = _deduplicate_messages(report_context["warnings"])
+        metrics["quality_context"] = {
+            "skipped_diagnostics": report_context["skipped_diagnostics"],
+            "errors": report_context["errors"],
+        }
+        scores = compute_multilabel_scores(
+            metrics,
+            skipped_count=_reliability_skip_count(
+                report_context["skipped_diagnostics"]
+            ),
+            warning_count=len(report_context["warnings"]),
+        )
         recommendation, confidence, decision_path, interpretations = (
             make_multilabel_recommendation(scores, metrics)
         )
@@ -542,6 +629,9 @@ class ComplexityProfiler:
             "label_density": audit["label_density"],
             "all_zero_sample_fraction": audit["all_zero_sample_fraction"],
         }
+        validated.grouping_summary["effective_supervised_evaluation_mode"] = probes[
+            "linear"
+        ].get("evaluation_mode")
         report = DiagnosticReport(
             recommendation=recommendation,
             recommendation_text="",
@@ -551,7 +641,7 @@ class ComplexityProfiler:
             interpretations=interpretations,
             decision_path=decision_path,
             warnings=report_context["warnings"],
-            errors=[],
+            errors=report_context["errors"],
             skipped_diagnostics=report_context["skipped_diagnostics"],
             preprocessing=build_preprocessing_summary(
                 validated.X,
@@ -574,13 +664,21 @@ class ComplexityProfiler:
         return self
 
     def report(self) -> DiagnosticReport:
-        """Return the fitted DiagnosticReport."""
+        """Return the fitted diagnostic report.
+
+        Raises:
+            ValueError: If :meth:`fit` has not been called successfully.
+        """
         if self.report_ is None:
             raise ValueError("Profiler has not been fit yet.")
         return self.report_
 
     def recommendation(self) -> str:
-        """Return the plain-text recommendation."""
+        """Return the fitted report's plain-text recommendation.
+
+        Raises:
+            ValueError: If :meth:`fit` has not been called successfully.
+        """
         return self.report().recommendation_text
 
     @staticmethod

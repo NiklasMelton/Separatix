@@ -80,6 +80,9 @@ By default, `diagnose(...)` returns a plain-text recommendation. With
 - preprocessing and runtime metadata
 
 The report is JSON-serializable through `report.to_dict()` and `report.to_json()`.
+Non-finite diagnostic values are represented as JSON `null`; `to_json()` never
+emits non-standard `NaN` or infinity literals. The default terse form removes
+large row-level arrays before copying them.
 
 For multilabel targets, `separatix` compares probe families across micro F1,
 macro F1, and sample Jaccard rather than collapsing the evidence into a single
@@ -94,7 +97,23 @@ For regression targets, call `diagnose(X, y, target_mode="regression")`.
 Regression evidence is compared across variance-weighted R2 and uniform-average
 R2, with normalized RMSE and target-neighborhood smoothness as supporting
 diagnostics. Classification-only boundary and fragmentation diagnostics are
-reported as skipped for continuous targets.
+marked not applicable and do not reduce regression confidence.
+
+All non-dummy probe families learn feature scaling inside each validation
+training fold. Sparse probes use non-centering scaling. Geometry and topology
+continue to describe the supplied, unscaled coordinate space, and the report
+records both choices under `preprocessing`.
+
+Optional feed-forward MLP probes can be installed and enabled explicitly:
+
+```bash
+pip install "separatix[mlp]"
+```
+
+Set `mlp_probes=True` and use `mlp_device`, `mlp_trigger_skill_threshold`,
+`mlp_min_improvement`, and `mlp_max_parameters` to control them. An MLP can
+override simpler-family guidance only with complete held-out evidence; failed
+or infeasible group splits never fall back to in-sample override evidence.
 
 Optional persistent-topology diagnostics can be installed with:
 
@@ -112,8 +131,7 @@ sparse-compatible mutual-nearest-neighbor component summary;
 `topology="persistent"` adds persistent homology when `ripser` is installed.
 `topology="auto"` skips topology under the fast budget and otherwise attempts
 both summaries. Regression topology is descriptive supporting evidence: it is
-shown in the score and decision path but never changes the recommendation label
-or confidence.
+included in the report but never changes the recommendation label or confidence.
 
 ## Recommendation Categories
 
@@ -121,9 +139,18 @@ or confidence.
 - `smooth_nonlinear_recommended`
 - `kernel_or_local_recommended`
 - `high_capacity_or_partitioning_recommended`
+- `feedforward_mlp_recommended`
 - `feature_or_label_bottleneck_likely`
 - `insufficient_data_or_unreliable_geometry`
 - `inconclusive`
+- `linear_response_likely_sufficient`
+- `smooth_nonlinear_response_recommended`
+- `kernel_or_local_regression_recommended`
+- `higher_capacity_or_partitioning_regression_recommended`
+- `feedforward_mlp_regression_recommended`
+- `feature_or_target_bottleneck_likely`
+- `insufficient_data_or_unreliable_regression_geometry`
+- `inconclusive_regression_diagnostic`
 
 These categories are intentionally coarse. They describe the apparent geometry
 and difficulty of the labeled feature space, not a guaranteed best model choice.
@@ -160,7 +187,7 @@ The recommendation is produced by a fixed, inspectable pipeline:
    `raw_best_family` and `recommended_family` when a report is requested.
 
 The full rationale and decision rules are documented in
-[docs/decision_pipeline.md](/Users/niklasmelton/code/Separatix/docs/decision_pipeline.md).
+[docs/decision_pipeline.md](https://github.com/NiklasMelton/Separatix/blob/develop/docs/decision_pipeline.md).
 
 ## Sparse Inputs And Memory Behavior
 
@@ -170,19 +197,37 @@ step would require densification, `separatix` can fail, skip, or warn and
 subsample before densifying, depending on configuration. These events are
 recorded in the report.
 
+`max_samples` and `max_dense_mb` are hard limits. Group-aware sampling never
+splits a group or exceeds the row cap. If no support-preserving sample fits,
+the affected supervised diagnostic is skipped and reliability is marked
+insufficient instead of silently dropping classes or labels. The dense-memory
+budget applies to sparse multilabel targets as well as feature matrices.
+
+When `groups` are supplied, sampling keeps groups whole and predictive evidence
+must come from group-disjoint held-out splits. Each evaluated class or label
+side needs support in both training and test partitions. A single group, an
+oversized group, or a class confined to too few groups therefore causes the
+affected supervised evidence to be skipped instead of evaluated on its training
+rows. Geometry and topology remain descriptive in those cases.
+
+Numeric one-dimensional targets—including non-integral values—remain
+categorical unless `target_mode="regression"` is explicit. High-cardinality
+numeric classification targets produce a warning to make accidental routing
+visible.
+
 ## Examples
 
-- [examples/basic_breast_cancer.py](/Users/niklasmelton/code/Separatix/examples/basic_breast_cancer.py)
-- [examples/linear_hyperplane_visual.py](/Users/niklasmelton/code/Separatix/examples/linear_hyperplane_visual.py)
-- [examples/curvilinear_boundary_visual.py](/Users/niklasmelton/code/Separatix/examples/curvilinear_boundary_visual.py)
-- [examples/high_dimensional_linear_hyperplane.py](/Users/niklasmelton/code/Separatix/examples/high_dimensional_linear_hyperplane.py)
-- [examples/high_dimensional_curvilinear_hyperplane.py](/Users/niklasmelton/code/Separatix/examples/high_dimensional_curvilinear_hyperplane.py)
-- [examples/moons_vs_linear.py](/Users/niklasmelton/code/Separatix/examples/moons_vs_linear.py)
-- [examples/circles_kernel_signal.py](/Users/niklasmelton/code/Separatix/examples/circles_kernel_signal.py)
-- [examples/recommendation_complexity_ladder.py](/Users/niklasmelton/code/Separatix/examples/recommendation_complexity_ladder.py)
-- [examples/multiclass_wine.py](/Users/niklasmelton/code/Separatix/examples/multiclass_wine.py)
-- [examples/openml_multilabel_yeast.py](/Users/niklasmelton/code/Separatix/examples/openml_multilabel_yeast.py)
-- [examples/sparse_text_like_embeddings.py](/Users/niklasmelton/code/Separatix/examples/sparse_text_like_embeddings.py)
+- [examples/basic_breast_cancer.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/basic_breast_cancer.py)
+- [examples/linear_hyperplane_visual.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/linear_hyperplane_visual.py)
+- [examples/curvilinear_boundary_visual.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/curvilinear_boundary_visual.py)
+- [examples/high_dimensional_linear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_linear_hyperplane.py)
+- [examples/high_dimensional_curvilinear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_curvilinear_hyperplane.py)
+- [examples/moons_vs_linear.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/moons_vs_linear.py)
+- [examples/circles_kernel_signal.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/circles_kernel_signal.py)
+- [examples/recommendation_complexity_ladder.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/recommendation_complexity_ladder.py)
+- [examples/multiclass_wine.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/multiclass_wine.py)
+- [examples/openml_multilabel_yeast.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/openml_multilabel_yeast.py)
+- [examples/sparse_text_like_embeddings.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/sparse_text_like_embeddings.py)
 
 ## Related Work
 

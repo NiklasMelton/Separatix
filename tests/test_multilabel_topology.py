@@ -126,6 +126,8 @@ def test_multilabel_topology_missing_ripser_is_safe(monkeypatch) -> None:
         {
             "name": "multilabel_persistent_topology",
             "reason": "ripser is not installed",
+            "status": "caution",
+            "severity": "caution",
         }
     ]
 

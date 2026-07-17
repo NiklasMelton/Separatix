@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from sklearn.neighbors import NearestNeighbors
 
 from separatix import diagnose
+from separatix.constants import INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
+from separatix.metrics.neighborhood import _singlelabel_summary
 from separatix.models.scoring import choose_cv
 
 
@@ -29,6 +32,7 @@ def test_grouped_singlelabel_report_skips_unsupported_classes() -> None:
     assert report.grouping["provided"] is True
     assert report.grouping["skipped_singlelabel_classes"] == ["fox"]
     assert report.class_summary["evaluable_classes"] == ["cat", "dog"]
+    assert report.recommendation == INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
 
 
 def test_grouped_singlelabel_requires_two_supported_classes() -> None:
@@ -137,3 +141,22 @@ def test_grouped_report_serialization_omits_raw_group_ids() -> None:
     assert "patient_b" not in payload
     assert report.grouping["provided"] is True
     assert "Grouped evaluation was used" in report.recommendation_text
+
+
+def test_cross_group_neighbors_never_request_all_rows(monkeypatch) -> None:
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(200, 5))
+    y = np.asarray([0, 1] * 100)
+    groups = np.repeat(np.arange(10), 20)
+    requested: list[int] = []
+    original = NearestNeighbors.kneighbors
+
+    def recording_kneighbors(self, *args, **kwargs):
+        requested.append(int(kwargs.get("n_neighbors") or self.n_neighbors))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(NearestNeighbors, "kneighbors", recording_kneighbors)
+    result = _singlelabel_summary(X, y, groups=groups, cross_group=True)
+    assert result["local_entropy"]
+    assert requested
+    assert max(requested) <= 15

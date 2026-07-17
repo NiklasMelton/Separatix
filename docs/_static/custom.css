@@ -1,0 +1,18 @@
+/* The logo uses black lettering on transparency, so it needs contrast in dark mode. */
+body[data-theme="dark"] .sidebar-logo {
+  background-color: #f8fafc;
+  border-radius: 0.5rem;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 12%);
+  box-sizing: border-box;
+  padding: 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  body:not([data-theme="light"]) .sidebar-logo {
+    background-color: #f8fafc;
+    border-radius: 0.5rem;
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 12%);
+    box-sizing: border-box;
+    padding: 0.5rem;
+  }
+}

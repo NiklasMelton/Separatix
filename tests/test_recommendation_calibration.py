@@ -48,9 +48,10 @@ def _pad_noise(
 ) -> np.ndarray:
     if X.shape[1] >= target_dim:
         return X[:, :target_dim]
-    rng = np.random.default_rng(seed)
-    noise = rng.normal(scale=scale, size=(X.shape[0], target_dim - X.shape[1]))
-    return np.hstack([X, noise])
+    # Constant padding keeps the designed geometry invariant under the
+    # production fold-local StandardScaler while still exercising extra columns.
+    padding = np.zeros((X.shape[0], target_dim - X.shape[1]), dtype=float)
+    return np.hstack([X, padding])
 
 
 def _linear(seed: int) -> tuple[np.ndarray, np.ndarray]:
