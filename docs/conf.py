@@ -38,10 +38,9 @@ html_title = "separatix documentation"
 html_logo = "../img/separatix_logo_transparent.png"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
+html_js_files = ["theme-toggle.js"]
 html_theme_options = {
-    "source_repository": "https://github.com/NiklasMelton/Separatix/",
-    "source_branch": "develop",
-    "source_directory": "docs/",
+    "top_of_page_buttons": [],
 }
 
 linkcheck_ignore = [
