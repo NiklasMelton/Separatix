@@ -51,6 +51,12 @@ _QUADRATIC_DEGREE = 2
 _MAX_FULL_QUADRATIC_FEATURES = 50_000
 _MAX_SKETCH_COMPONENTS = 2048
 _MIN_SKETCH_COMPONENTS = 128
+_FULL_QUADRATIC_VARIANT = "full_quadratic"
+_LOW_RANK_QUADRATIC_VARIANT = "low_rank_quadratic"
+_SMOOTH_PROBE_VARIANTS = (
+    _FULL_QUADRATIC_VARIANT,
+    _LOW_RANK_QUADRATIC_VARIANT,
+)
 _SMOOTH_PROBE_SKIP_REASON = (
     "quadratic expansion and low-rank sketch exceed configured memory budget"
 )
@@ -491,7 +497,7 @@ def run_model_probes(
             metrics.update(
                 {
                     **metadata,
-                    "probe_variant": "full_quadratic",
+                    "probe_variant": _FULL_QUADRATIC_VARIANT,
                     "model_name": "PolynomialFeatures+LogisticRegression",
                     "runtime_seconds": float(time.perf_counter() - start),
                     "evaluation_mode": evaluation_mode,
@@ -550,7 +556,7 @@ def run_model_probes(
                 metrics.update(
                     {
                         **metadata,
-                        "probe_variant": "low_rank_quadratic",
+                        "probe_variant": _LOW_RANK_QUADRATIC_VARIANT,
                         "sketch_n_components": int(sketch_components),
                         "estimated_sketch_mb": _estimate_dense_mb(
                             dense_X.shape[0], sketch_components, dtype
@@ -887,7 +893,7 @@ def run_regression_model_probes(
                 sample_info=sample_info,
                 target_names=target_names,
                 groups=dense_groups,
-                extra={**metadata, "probe_variant": "full_quadratic"},
+                extra={**metadata, "probe_variant": _FULL_QUADRATIC_VARIANT},
             )
         else:
             sketch_components = _choose_sketch_components(
@@ -925,7 +931,7 @@ def run_regression_model_probes(
                     groups=dense_groups,
                     extra={
                         **metadata,
-                        "probe_variant": "low_rank_quadratic",
+                        "probe_variant": _LOW_RANK_QUADRATIC_VARIANT,
                         "sketch_n_components": int(sketch_components),
                         "estimated_sketch_mb": _estimate_dense_mb(
                             dense_X.shape[0], sketch_components, dtype
@@ -1232,7 +1238,7 @@ def run_multilabel_model_probes(
                 groups=dense_info.get("groups"),
             )
             results["smooth_poly"].update(metadata)
-            results["smooth_poly"]["probe_variant"] = "full_quadratic"
+            results["smooth_poly"]["probe_variant"] = _FULL_QUADRATIC_VARIANT
         else:
             sketch_components = _choose_sketch_components(
                 dense_X.shape[0],
@@ -1267,7 +1273,7 @@ def run_multilabel_model_probes(
                     groups=dense_info.get("groups"),
                 )
                 results["smooth_poly"].update(metadata)
-                results["smooth_poly"]["probe_variant"] = "low_rank_quadratic"
+                results["smooth_poly"]["probe_variant"] = _LOW_RANK_QUADRATIC_VARIANT
                 results["smooth_poly"]["sketch_n_components"] = int(sketch_components)
 
     if budget["run_kernel_probe"]:

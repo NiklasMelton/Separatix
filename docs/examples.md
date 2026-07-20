@@ -32,6 +32,7 @@ access when executed.
 - [Kernel-like circles](https://github.com/NiklasMelton/Separatix/blob/develop/examples/circles_kernel_signal.py)
 - [Multiclass wine data](https://github.com/NiklasMelton/Separatix/blob/develop/examples/multiclass_wine.py)
 - [Random-label control](https://github.com/NiklasMelton/Separatix/blob/develop/examples/random_label_control.py)
+- [Probe family gallery](https://github.com/NiklasMelton/Separatix/blob/develop/examples/probe_family_gallery.py)
 - [Recommendation complexity ladder](https://github.com/NiklasMelton/Separatix/blob/develop/examples/recommendation_complexity_ladder.py)
 
 The examples are diagnostics, not benchmark claims. Results can vary with
