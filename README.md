@@ -133,6 +133,43 @@ sparse-compatible mutual-nearest-neighbor component summary;
 both summaries. Regression topology is descriptive supporting evidence: it is
 included in the report but never changes the recommendation label or confidence.
 
+## Probe Family Gallery
+
+`separatix` compares several deliberately small probe families rather than
+treating one flexible model as a universal answer. The fitted surfaces below
+illustrate the behavior each probe is intended to detect. The quadratic panel
+includes both the full expansion and low-rank sketch variants. The final four
+panels use four independently sampled and calibrated nonlinear tasks, one for
+each optional conditional MLP subtype. Every named subtype is the selected
+held-out candidate on its own task and produces a validated MLP override.
+
+The displayed boundaries are illustrative fits. Recommendations use held-out
+evidence, comparisons against the dummy baseline, uncertainty estimates, and a
+conservative preference for simpler families. Two-dimensional single-label
+classification is used here because its boundaries are easy to see. The MLP
+tasks each add five nuisance coordinates to two visible signal coordinates;
+their plots show fitted slices at the nuisance-coordinate medians. The compact
+tasks apply a 400-parameter cap so depth is compared within the compact budget,
+while the wide tasks compare all four candidates. These deterministic
+calibrations are architecture exemplars, not claims that one architecture is
+universally optimal. Multilabel and regression diagnostics use
+target-appropriate versions of the same probe families and their corresponding
+metrics.
+
+![Separatix probe family gallery](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_probe_family_gallery.png)
+
+Regenerate the gallery after installing the example dependencies:
+
+```bash
+poetry install -E examples -E mlp
+poetry run python examples/probe_family_gallery.py
+```
+
+The script checks its coverage against the implemented probe registry and fails
+if any calibrated task stops selecting its intended MLP subtype or stops
+clearing the simpler probes. It also requires the selected subtype to lead the
+next-best eligible MLP by at least 0.01 held-out balanced accuracy.
+
 ## Recommendation Categories
 
 - `linear_likely_sufficient`
@@ -224,6 +261,7 @@ visible.
 - [examples/high_dimensional_curvilinear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_curvilinear_hyperplane.py)
 - [examples/moons_vs_linear.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/moons_vs_linear.py)
 - [examples/circles_kernel_signal.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/circles_kernel_signal.py)
+- [examples/probe_family_gallery.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/probe_family_gallery.py)
 - [examples/recommendation_complexity_ladder.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/recommendation_complexity_ladder.py)
 - [examples/multiclass_wine.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/multiclass_wine.py)
 - [examples/openml_multilabel_yeast.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/openml_multilabel_yeast.py)
