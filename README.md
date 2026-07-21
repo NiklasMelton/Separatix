@@ -283,3 +283,9 @@ acknowledge:
 
 We do not follow those procedures directly, but they are relevant background
 for why geometry-aware pretraining diagnostics are useful.
+
+## License
+
+The source code is licensed under the GNU Affero General Public License
+v3.0 or later (AGPLv3-or-later). Commercial licenses are available; please
+contact the maintainer through GitHub.

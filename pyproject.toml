@@ -4,7 +4,7 @@ version = "0.1.0a5"
 description = "Diagnostic profiling of supervised feature spaces before model training."
 authors = [{ name = "Niklas Melton", email = "niklas@example.com" }]
 readme = "README.md"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.9,<3.15"
 dependencies = [
     "numpy>=1.23,<2.1; python_version < '3.11'",
@@ -23,6 +23,7 @@ mlp = ["torch>=2.1"]
 examples = ["matplotlib>=3.6", "pandas>=1.5"]
 
 [tool.poetry]
+license = "AGPL-3.0-or-later"
 packages = [{ include = "separatix" }]
 
 [tool.poetry.group.dev.dependencies]
