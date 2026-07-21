@@ -1,4 +1,4 @@
-[![separatix logo](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_logo.png)](https://github.com/NiklasMelton/Separatix)
+[![separatix logo](img/separatix_logo.png)](https://github.com/NiklasMelton/Separatix)
 
 # Separatix
 
@@ -133,6 +133,43 @@ sparse-compatible mutual-nearest-neighbor component summary;
 both summaries. Regression topology is descriptive supporting evidence: it is
 included in the report but never changes the recommendation label or confidence.
 
+## Probe Family Gallery
+
+`separatix` compares several deliberately small probe families rather than
+treating one flexible model as a universal answer. The fitted surfaces below
+illustrate the behavior each probe is intended to detect. The quadratic panel
+includes both the full expansion and low-rank sketch variants. The final four
+panels use four independently sampled and calibrated nonlinear tasks, one for
+each optional conditional MLP subtype. Every named subtype is the selected
+held-out candidate on its own task and produces a validated MLP override.
+
+The displayed boundaries are illustrative fits. Recommendations use held-out
+evidence, comparisons against the dummy baseline, uncertainty estimates, and a
+conservative preference for simpler families. Two-dimensional single-label
+classification is used here because its boundaries are easy to see. The MLP
+tasks each add five nuisance coordinates to two visible signal coordinates;
+their plots show fitted slices at the nuisance-coordinate medians. The compact
+tasks apply a 400-parameter cap so depth is compared within the compact budget,
+while the wide tasks compare all four candidates. These deterministic
+calibrations are architecture exemplars, not claims that one architecture is
+universally optimal. Multilabel and regression diagnostics use
+target-appropriate versions of the same probe families and their corresponding
+metrics.
+
+![Separatix probe family gallery](img/separatix_probe_family_gallery.png)
+
+Regenerate the gallery after installing the example dependencies:
+
+```bash
+poetry install -E examples -E mlp
+poetry run python examples/probe_family_gallery.py
+```
+
+The script checks its coverage against the implemented probe registry and fails
+if any calibrated task stops selecting its intended MLP subtype or stops
+clearing the simpler probes. It also requires the selected subtype to lead the
+next-best eligible MLP by at least 0.01 held-out balanced accuracy.
+
 ## Recommendation Categories
 
 - `linear_likely_sufficient`
@@ -162,7 +199,7 @@ finally weak-signal or random-label bottlenecks. The x-axis is the intended
 dataset complexity, while the y-axis is the coarse recommendation level
 reported by `separatix`.
 
-![separatix recommendation complexity ladder](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_recommendation_complexity_ladder.png)
+![separatix recommendation complexity ladder](img/separatix_recommendation_complexity_ladder.png)
 
 ## Decision Pipeline
 
@@ -187,7 +224,7 @@ The recommendation is produced by a fixed, inspectable pipeline:
    `raw_best_family` and `recommended_family` when a report is requested.
 
 The full rationale and decision rules are documented in
-[docs/decision_pipeline.md](https://github.com/NiklasMelton/Separatix/blob/develop/docs/decision_pipeline.md).
+[the decision pipeline reference](docs/decision_pipeline.md).
 
 ## Sparse Inputs And Memory Behavior
 
@@ -217,23 +254,25 @@ visible.
 
 ## Examples
 
-- [examples/basic_breast_cancer.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/basic_breast_cancer.py)
-- [examples/linear_hyperplane_visual.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/linear_hyperplane_visual.py)
-- [examples/curvilinear_boundary_visual.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/curvilinear_boundary_visual.py)
-- [examples/high_dimensional_linear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_linear_hyperplane.py)
-- [examples/high_dimensional_curvilinear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_curvilinear_hyperplane.py)
-- [examples/moons_vs_linear.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/moons_vs_linear.py)
-- [examples/circles_kernel_signal.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/circles_kernel_signal.py)
-- [examples/recommendation_complexity_ladder.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/recommendation_complexity_ladder.py)
-- [examples/multiclass_wine.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/multiclass_wine.py)
-- [examples/openml_multilabel_yeast.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/openml_multilabel_yeast.py)
-- [examples/sparse_text_like_embeddings.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/sparse_text_like_embeddings.py)
+- [Basic breast-cancer report](docs/examples.md#basic-breast-cancer-report)
+- [Linear hyperplane visualization](docs/examples.md#linear-hyperplane-visualization)
+- [Curvilinear boundary visualization](docs/examples.md#curvilinear-boundary-visualization)
+- [High-dimensional linear hyperplane](docs/examples.md#high-dimensional-linear-hyperplane)
+- [High-dimensional curvilinear hyperplane](docs/examples.md#high-dimensional-curvilinear-hyperplane)
+- [Two moons](docs/examples.md#two-moons)
+- [Kernel-like circles](docs/examples.md#kernel-like-circles)
+- [Probe family gallery](docs/examples.md#probe-family-gallery)
+- [Recommendation complexity ladder](docs/examples.md#recommendation-complexity-ladder)
+- [Multiclass wine data](docs/examples.md#multiclass-wine-data)
+- [OpenML multilabel yeast](docs/examples.md#openml-multilabel-yeast)
+- [Sparse text-like embeddings](docs/examples.md#sparse-text-like-embeddings)
 
 ## Related Work
 
 This package is not an implementation of a published dataset-complexity
 procedure, but the project is adjacent to and inspired by prior work on
-classification complexity and data geometry. In particular, would like to acknowledge:
+classification complexity and data geometry. In particular, we would like to 
+acknowledge:
 
 - Ho and Basu, "Complexity Measures of Supervised Classification Problems"
   ([PDF](https://sci2s.ugr.es/keel/pdf/algorithm/articulo/2002-IEEE-TPAMI-Ho-DC.pdf))
@@ -244,3 +283,9 @@ classification complexity and data geometry. In particular, would like to acknow
 
 We do not follow those procedures directly, but they are relevant background
 for why geometry-aware pretraining diagnostics are useful.
+
+## License
+
+The source code is licensed under the GNU Affero General Public License
+v3.0 or later (AGPLv3-or-later). Commercial licenses are available; please
+contact the maintainer through GitHub.
