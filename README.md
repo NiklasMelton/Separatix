@@ -1,4 +1,4 @@
-[![separatix logo](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_logo.png)](https://github.com/NiklasMelton/Separatix)
+[![separatix logo](img/separatix_logo.png)](https://github.com/NiklasMelton/Separatix)
 
 # Separatix
 
@@ -156,7 +156,7 @@ universally optimal. Multilabel and regression diagnostics use
 target-appropriate versions of the same probe families and their corresponding
 metrics.
 
-![Separatix probe family gallery](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_probe_family_gallery.png)
+![Separatix probe family gallery](img/separatix_probe_family_gallery.png)
 
 Regenerate the gallery after installing the example dependencies:
 
@@ -199,7 +199,7 @@ finally weak-signal or random-label bottlenecks. The x-axis is the intended
 dataset complexity, while the y-axis is the coarse recommendation level
 reported by `separatix`.
 
-![separatix recommendation complexity ladder](https://raw.githubusercontent.com/NiklasMelton/Separatix/develop/img/separatix_recommendation_complexity_ladder.png)
+![separatix recommendation complexity ladder](img/separatix_recommendation_complexity_ladder.png)
 
 ## Decision Pipeline
 
@@ -224,7 +224,7 @@ The recommendation is produced by a fixed, inspectable pipeline:
    `raw_best_family` and `recommended_family` when a report is requested.
 
 The full rationale and decision rules are documented in
-[docs/decision_pipeline.md](https://github.com/NiklasMelton/Separatix/blob/develop/docs/decision_pipeline.md).
+[the decision pipeline reference](docs/decision_pipeline.md).
 
 ## Sparse Inputs And Memory Behavior
 
@@ -254,18 +254,18 @@ visible.
 
 ## Examples
 
-- [examples/basic_breast_cancer.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/basic_breast_cancer.py)
-- [examples/linear_hyperplane_visual.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/linear_hyperplane_visual.py)
-- [examples/curvilinear_boundary_visual.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/curvilinear_boundary_visual.py)
-- [examples/high_dimensional_linear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_linear_hyperplane.py)
-- [examples/high_dimensional_curvilinear_hyperplane.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/high_dimensional_curvilinear_hyperplane.py)
-- [examples/moons_vs_linear.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/moons_vs_linear.py)
-- [examples/circles_kernel_signal.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/circles_kernel_signal.py)
-- [examples/probe_family_gallery.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/probe_family_gallery.py)
-- [examples/recommendation_complexity_ladder.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/recommendation_complexity_ladder.py)
-- [examples/multiclass_wine.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/multiclass_wine.py)
-- [examples/openml_multilabel_yeast.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/openml_multilabel_yeast.py)
-- [examples/sparse_text_like_embeddings.py](https://github.com/NiklasMelton/Separatix/blob/develop/examples/sparse_text_like_embeddings.py)
+- [Basic breast-cancer report](docs/examples.md#basic-breast-cancer-report)
+- [Linear hyperplane visualization](docs/examples.md#linear-hyperplane-visualization)
+- [Curvilinear boundary visualization](docs/examples.md#curvilinear-boundary-visualization)
+- [High-dimensional linear hyperplane](docs/examples.md#high-dimensional-linear-hyperplane)
+- [High-dimensional curvilinear hyperplane](docs/examples.md#high-dimensional-curvilinear-hyperplane)
+- [Two moons](docs/examples.md#two-moons)
+- [Kernel-like circles](docs/examples.md#kernel-like-circles)
+- [Probe family gallery](docs/examples.md#probe-family-gallery)
+- [Recommendation complexity ladder](docs/examples.md#recommendation-complexity-ladder)
+- [Multiclass wine data](docs/examples.md#multiclass-wine-data)
+- [OpenML multilabel yeast](docs/examples.md#openml-multilabel-yeast)
+- [Sparse text-like embeddings](docs/examples.md#sparse-text-like-embeddings)
 
 ## Related Work
 
