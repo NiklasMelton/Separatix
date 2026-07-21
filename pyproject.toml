@@ -1,6 +1,6 @@
 [project]
 name = "separatix"
-version = "0.1.0a5"
+version = "0.1.0"
 description = "Diagnostic profiling of supervised feature spaces before model training."
 authors = [{ name = "Niklas Melton", email = "niklas@example.com" }]
 readme = "README.md"
