@@ -135,6 +135,7 @@ def test_singlelabel_recommendation_can_be_overridden_by_mlp_evidence() -> None:
     )
 
     assert recommendation == FEEDFORWARD_MLP_RECOMMENDED
+    assert "optional MLP probe clearly improved" in decision_path[0]
     assert any("mlp_one_layer_compact" in item for item in decision_path)
     assert "mlp_recommendation_evidence" in interpretations
 
@@ -180,6 +181,7 @@ def test_regression_recommendation_can_be_overridden_by_mlp_evidence() -> None:
     )
 
     assert recommendation == FEEDFORWARD_MLP_REGRESSION_RECOMMENDED
+    assert "optional MLP probe clearly improved" in decision_path[0]
     assert any("mlp_two_layer_compact" in item for item in decision_path)
     assert "mlp_recommendation_evidence" in interpretations
 

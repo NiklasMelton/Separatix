@@ -1016,7 +1016,7 @@ def make_recommendation(
             warning_count=0,
         )
     evidence = metrics["recommendation_evidence"]
-    decision_path: list[str] = [_comparison_method_note(metrics)]
+    decision_path: list[str] = []
     interpretations: dict[str, str] = {}
 
     if _has_blocking_quality_flag(evidence):
@@ -1034,10 +1034,6 @@ def make_recommendation(
     else:
         raw_best_family = evidence["raw_best_family"]
         selected_family = evidence["recommended_family"]
-        decision_path.append(
-            "Probe families were compared with conservative escalation: "
-            f"raw_best={raw_best_family}, recommended={selected_family}."
-        )
         recommendation = _recommend_selected_family(evidence)
         if selected_family == "linear":
             decision_path.append(
@@ -1067,10 +1063,19 @@ def make_recommendation(
             decision_path.append(
                 "No predictive family satisfied the evidence-selection rule."
             )
+        decision_path.append(
+            "Probe families were compared with conservative escalation: "
+            f"raw_best={raw_best_family}, recommended={selected_family}."
+        )
 
     if _mlp_override_active(metrics):
         mlp_payload = _mlp_override_payload(metrics)
         recommendation = FEEDFORWARD_MLP_RECOMMENDED
+        decision_path.insert(
+            0,
+            "The optional MLP probe clearly improved over the aligned simpler "
+            "families and satisfied the configured override criteria.",
+        )
         decision_path.append(
             "Conditional MLP probes were only run because simpler probes did not "
             "meet the configured absolute-skill threshold."
@@ -1085,6 +1090,8 @@ def make_recommendation(
     if quality_flags:
         flag_names = ", ".join(flag["name"] for flag in quality_flags)
         decision_path.append(f"Evidence quality flags: {flag_names}.")
+
+    decision_path.append(_comparison_method_note(metrics))
 
     confidence = _confidence_from_evidence(recommendation, evidence)
     interpretations["signal"] = (
@@ -1581,11 +1588,7 @@ def make_multilabel_recommendation(
     """Generate a conservative multilabel recommendation and decision path."""
     evidence = metrics["multilabel_recommendation_evidence"]
     flags = evidence["quality_flags"]
-    decision_path = [
-        _comparison_method_note(metrics),
-        "This run used the multilabel diagnostic path; probe families were "
-        "compared across micro F1, macro F1, and sample Jaccard.",
-    ]
+    decision_path: list[str] = []
     if any(flag.get("severity") == "blocking" for flag in flags):
         recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
         decision_path.append(
@@ -1661,6 +1664,11 @@ def make_multilabel_recommendation(
     if _mlp_override_active(metrics):
         mlp_payload = _mlp_override_payload(metrics)
         recommendation = FEEDFORWARD_MLP_RECOMMENDED
+        decision_path.insert(
+            0,
+            "The optional MLP probe clearly improved over the aligned simpler "
+            "multilabel families and satisfied the configured override criteria.",
+        )
         decision_path.append(
             "Conditional MLP probes were only run because simpler multilabel "
             "probes did not meet the configured absolute-skill threshold."
@@ -1677,6 +1685,11 @@ def make_multilabel_recommendation(
             + ", ".join(str(flag["name"]) for flag in flags)
             + "."
         )
+    decision_path.append(
+        "This run used the multilabel diagnostic path; probe families were "
+        "compared across micro F1, macro F1, and sample Jaccard."
+    )
+    decision_path.append(_comparison_method_note(metrics))
     confidence = "low" if recommendation == INCONCLUSIVE else "medium"
     if recommendation == INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY:
         confidence = "low"
@@ -2118,11 +2131,7 @@ def make_regression_recommendation(
     """Generate a conservative regression recommendation and decision path."""
     evidence = metrics["regression_recommendation_evidence"]
     flags = evidence["quality_flags"]
-    decision_path = [
-        _comparison_method_note(metrics),
-        "This run used the explicit regression diagnostic path; probe families "
-        "were compared across variance-weighted and uniform-average R2.",
-    ]
+    decision_path: list[str] = []
     if any(flag.get("severity") == "blocking" for flag in flags):
         recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY
         decision_path.append(
@@ -2189,6 +2198,11 @@ def make_regression_recommendation(
     if _mlp_override_active(metrics):
         mlp_payload = _mlp_override_payload(metrics)
         recommendation = FEEDFORWARD_MLP_REGRESSION_RECOMMENDED
+        decision_path.insert(
+            0,
+            "The optional MLP probe clearly improved over the aligned simpler "
+            "regression families and satisfied the configured override criteria.",
+        )
         decision_path.append(
             "Conditional MLP probes were only run because simpler regression "
             "probes did not meet the configured absolute-skill threshold."
@@ -2215,6 +2229,11 @@ def make_regression_recommendation(
             "Hard-subset topology was unavailable or skipped; optional topology "
             "did not alter the recommendation or confidence."
         )
+    decision_path.append(
+        "This run used the explicit regression diagnostic path; probe families "
+        "were compared across variance-weighted and uniform-average R2."
+    )
+    decision_path.append(_comparison_method_note(metrics))
     confidence = (
         "low"
         if recommendation
