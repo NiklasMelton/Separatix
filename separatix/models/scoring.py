@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from typing import Any
 
@@ -28,7 +29,67 @@ from sklearn.model_selection import (
 )
 
 from separatix.config import ProfilerConfig
-from separatix.sampling import choose_multilabel_holdout, grouped_singlelabel_cv
+from separatix.sampling import (
+    PrecomputedSplitter,
+    choose_multilabel_holdout,
+    grouped_singlelabel_cv,
+)
+
+
+def materialize_evaluation_plan(
+    cv: Any | None,
+    X: Any,
+    y: Any,
+    *,
+    method: str,
+    row_indices: np.ndarray,
+    groups: np.ndarray | None = None,
+) -> tuple[Any | None, dict[str, Any]]:
+    """Materialize one reusable split plan and return transparent metadata."""
+    row_indices = np.asarray(row_indices, dtype=int)
+    digest = hashlib.sha256()
+    digest.update(row_indices.tobytes())
+    digest.update(method.encode("utf-8"))
+    if cv is None:
+        return None, {
+            "alignment_status": "unavailable",
+            "evaluation_plan_id": digest.hexdigest()[:16],
+            "cv_method": method,
+            "n_samples": int(row_indices.size),
+            "n_splits": 0,
+            "group_aware": bool(groups is not None),
+            "train_sizes": [],
+            "test_sizes": [],
+            "fold_assignments": None,
+        }
+
+    split_iter = cv.split(X, y, groups) if groups is not None else cv.split(X, y)
+    splits = [
+        (np.asarray(train_idx, dtype=int), np.asarray(test_idx, dtype=int))
+        for train_idx, test_idx in split_iter
+    ]
+    assignments = np.full(row_indices.size, -1, dtype=int)
+    for fold, (train_idx, test_idx) in enumerate(splits):
+        digest.update(train_idx.tobytes())
+        digest.update(test_idx.tobytes())
+        if np.any(assignments[test_idx] != -1):
+            raise ValueError(
+                "Evaluation split plan assigns a row to multiple test folds."
+            )
+        assignments[test_idx] = fold
+    if np.any(assignments < 0):
+        raise ValueError("Evaluation split plan does not cover every evaluation row.")
+    return PrecomputedSplitter(splits), {
+        "alignment_status": "aligned",
+        "evaluation_plan_id": digest.hexdigest()[:16],
+        "cv_method": method,
+        "n_samples": int(row_indices.size),
+        "n_splits": len(splits),
+        "group_aware": bool(groups is not None),
+        "train_sizes": [int(train_idx.size) for train_idx, _ in splits],
+        "test_sizes": [int(test_idx.size) for _, test_idx in splits],
+        "fold_assignments": assignments.tolist(),
+    }
 
 
 def _prepared_estimator(estimator: Any, train_size: int) -> Any:

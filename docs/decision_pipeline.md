@@ -103,6 +103,12 @@ Dense inputs are centered and scaled, sparse inputs are scaled without
 centering, and random-feature maps run after scaling. Geometry and topology
 remain descriptions of the original input coordinates.
 
+All active ordinary probes use the same evaluation rows and a single
+materialized validation split plan. When dense-only probes require memory-aware
+subsampling, that support-preserving cohort becomes the shared cohort for the
+other ordinary probes as well. Each probe records the same
+`evaluation_plan_id`.
+
 - If the linear probe is close to the strongest observed family, that supports
   a linear recommendation.
 - If nonlinear probes clearly improve over linear, that supports a nonlinear
@@ -188,6 +194,14 @@ Probe uncertainty combines:
 
 - a class-aware balanced-accuracy variance estimate
 - repeated holdout stability when the budget includes repeated fits
+
+Recommendation comparisons primarily use paired bootstrap deltas computed from
+the shared out-of-fold predictions. The report records point deltas, paired
+standard errors, 95% percentile bounds, resample counts, and the decision
+method. Marginal uncertainty remains visible and is used as a per-comparison
+fallback when aligned prediction evidence is unavailable. Paired OOF bootstrap
+intervals account for correlated probe errors, but they are not confidence
+intervals from an independent test set.
 
 For multilabel probes, `separatix` records the corresponding evidence across
 three primary metrics:
@@ -366,8 +380,10 @@ Reasoning:
 Before choosing any model family, `separatix` checks whether the strongest
 observed probe clears a signal check against the dummy or prevalence baseline.
 
-For single-label runs, this is a 95% normal-approximation check against the
-dummy balanced-accuracy baseline.
+For single-label runs, this primarily requires the paired 95% bootstrap
+interval against the dummy to exclude zero and the point gain to clear the
+minimum signal margin. If that paired comparison is unavailable, the existing
+95% normal-approximation check is used for that comparison only.
 
 For multilabel runs, this requires the best predictive family to clearly beat
 the dummy or prevalence baseline on at least two of:

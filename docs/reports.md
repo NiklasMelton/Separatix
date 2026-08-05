@@ -29,6 +29,12 @@ evidence. Depending on the target path, inspect `recommendation_evidence`,
 These objects distinguish the numerically strongest `raw_best_family` from the
 conservatively selected `recommended_family`.
 
+`probe_evaluation` describes the shared evaluation cohort and materialized fold
+plan. `paired_probe_comparisons` contains probe-level paired bootstrap deltas;
+the target-specific recommendation evidence identifies whether each decision
+used that paired evidence or the marginal fallback. Full reports retain
+row-to-fold assignments for audits, while terse serialization prunes them.
+
 The package compares simple families first and requires clear evidence before
 escalating. Geometry and topology support the explanation; they do not bypass a
 weak predictive-signal gate.

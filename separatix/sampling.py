@@ -39,6 +39,7 @@ class BudgetConfig(TypedDict):
     max_boundary_samples: int
     cv_folds: int
     bootstrap_repeats: int
+    pairwise_resamples: int
     run_kernel_probe: bool
     run_persistent_topology: bool | str
 
