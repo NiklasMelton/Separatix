@@ -299,8 +299,7 @@ def _family_within_one_standard_error(
     if paired is not None:
         tolerance = float(paired["paired_standard_error"])
         return bool(
-            float(paired["point_delta"])
-            <= max(tolerance, MIN_FAMILY_IMPROVEMENT)
+            float(paired["point_delta"]) <= max(tolerance, MIN_FAMILY_IMPROVEMENT)
         )
     combined_error = _combined_standard_error(family, best_family)
     tolerance = ONE_STANDARD_ERROR * (
@@ -391,9 +390,7 @@ def _recommended_family(
     smooth = families["smooth_nonlinear"]
     local = families["local_kernel"]
 
-    if _family_within_one_standard_error(
-        linear, raw_best_family, paired_payload
-    ):
+    if _family_within_one_standard_error(linear, raw_best_family, paired_payload):
         return "linear"
     if smooth.score is None:
         return local.family if local.score is not None else raw_best_family.family
@@ -709,9 +706,7 @@ def _build_recommendation_evidence(
     paired_payload = metrics.get("paired_probe_comparisons", {})
     raw_best_family = _best_predictive_family(families)
     dummy_family = families["dummy"]
-    candidate_family = _recommended_family(
-        families, raw_best_family, paired_payload
-    )
+    candidate_family = _recommended_family(families, raw_best_family, paired_payload)
     signal_error = _combined_standard_error(raw_best_family, dummy_family)
     signal_paired = (
         lookup_paired_comparison(
@@ -739,8 +734,7 @@ def _build_recommendation_evidence(
                     and signal_error is not None
                     and raw_best_family.score - dummy_family.score
                     > SIGNAL_CONFIDENCE_Z * signal_error
-                    and raw_best_family.score - dummy_family.score
-                    > MIN_SIGNAL_MARGIN
+                    and raw_best_family.score - dummy_family.score > MIN_SIGNAL_MARGIN
                 )
             )
         )
@@ -1254,9 +1248,7 @@ def _multilabel_within_one_standard_error(
     if paired is not None:
         return bool(
             float(paired["point_delta"])
-            <= max(
-                float(paired["paired_standard_error"]), MIN_FAMILY_IMPROVEMENT
-            )
+            <= max(float(paired["paired_standard_error"]), MIN_FAMILY_IMPROVEMENT)
         )
     error = _multilabel_combined_error(first, second)
     tolerance = error if error is not None else 0.0
@@ -1297,9 +1289,7 @@ def _multilabel_comparison_counts(
     for metric in _MULTILABEL_PRIMARY_METRICS:
         first_item = evidence[first][metric]
         second_item = evidence[second][metric]
-        paired = _paired_metric_entry(
-            first_item, second_item, metric, paired_payload
-        )
+        paired = _paired_metric_entry(first_item, second_item, metric, paired_payload)
         if _multilabel_clearly_better(
             first_item,
             second_item,
@@ -1594,7 +1584,7 @@ def make_multilabel_recommendation(
     decision_path = [
         _comparison_method_note(metrics),
         "This run used the multilabel diagnostic path; probe families were "
-        "compared across micro F1, macro F1, and sample Jaccard."
+        "compared across micro F1, macro F1, and sample Jaccard.",
     ]
     if any(flag.get("severity") == "blocking" for flag in flags):
         recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
@@ -1828,9 +1818,7 @@ def _regression_within_one_standard_error(
     if paired is not None:
         return bool(
             float(paired["point_delta"])
-            <= max(
-                float(paired["paired_standard_error"]), MIN_FAMILY_IMPROVEMENT
-            )
+            <= max(float(paired["paired_standard_error"]), MIN_FAMILY_IMPROVEMENT)
         )
     error = _regression_combined_error(first, second)
     tolerance = error if error is not None else 0.0
@@ -1868,9 +1856,7 @@ def _regression_comparison_counts(
     for metric in _REGRESSION_PRIMARY_METRICS:
         first_item = evidence[first][metric]
         second_item = evidence[second][metric]
-        paired = _paired_metric_entry(
-            first_item, second_item, metric, paired_payload
-        )
+        paired = _paired_metric_entry(first_item, second_item, metric, paired_payload)
         if _regression_clearly_better(
             first_item,
             second_item,
@@ -2135,7 +2121,7 @@ def make_regression_recommendation(
     decision_path = [
         _comparison_method_note(metrics),
         "This run used the explicit regression diagnostic path; probe families "
-        "were compared across variance-weighted and uniform-average R2."
+        "were compared across variance-weighted and uniform-average R2.",
     ]
     if any(flag.get("severity") == "blocking" for flag in flags):
         recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY

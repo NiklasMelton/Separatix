@@ -114,9 +114,7 @@ def _record_dense_probe_skips(
     skipped.extend({"name": name, "reason": reason} for name in consumers)
 
 
-def _attach_plan_id(
-    result: dict[str, Any], evaluation_plan_id: str
-) -> dict[str, Any]:
+def _attach_plan_id(result: dict[str, Any], evaluation_plan_id: str) -> dict[str, Any]:
     """Attach the shared plan identifier to one probe result."""
     result["evaluation_plan_id"] = evaluation_plan_id
     return result
@@ -734,9 +732,7 @@ def run_model_probes(
                         "rff",
                         RBFSampler(
                             gamma=1.0 / max(1, dense_X.shape[1]),
-                            n_components=min(
-                                256, max(32, dense_X.shape[1] * 2)
-                            ),
+                            n_components=min(256, max(32, dense_X.shape[1] * 2)),
                             random_state=config.random_state,
                         ),
                     ),
@@ -761,9 +757,7 @@ def run_model_probes(
                 cv=cv,
                 groups=groups_used,
             )
-            metrics = summarize_predictions(
-                y_used, preds, class_labels=class_labels
-            )
+            metrics = summarize_predictions(y_used, preds, class_labels=class_labels)
             metrics.update(
                 summarize_stability(
                     estimator,
@@ -962,9 +956,7 @@ def run_regression_model_probes(
             method="insufficient_support",
         )
     dense_consumers = ("regression_smooth_nonlinear_probe",) + (
-        ("regression_kernel_approximation_probe",)
-        if budget["run_kernel_probe"]
-        else ()
+        ("regression_kernel_approximation_probe",) if budget["run_kernel_probe"] else ()
     )
     skip_start = len(report_context.setdefault("skipped_diagnostics", []))
     dense_info = ensure_dense_or_sample_regression(
@@ -1147,9 +1139,7 @@ def run_regression_model_probes(
                         "rff",
                         RBFSampler(
                             gamma=1.0 / max(1, dense_X.shape[1]),
-                            n_components=min(
-                                256, max(32, dense_X.shape[1] * 2)
-                            ),
+                            n_components=min(256, max(32, dense_X.shape[1] * 2)),
                             random_state=config.random_state,
                         ),
                     ),
@@ -1553,9 +1543,7 @@ def run_multilabel_model_probes(
                         "rff",
                         RBFSampler(
                             gamma=1.0 / max(1, dense_X.shape[1]),
-                            n_components=min(
-                                256, max(32, dense_X.shape[1] * 2)
-                            ),
+                            n_components=min(256, max(32, dense_X.shape[1] * 2)),
                             random_state=config.random_state,
                         ),
                     ),

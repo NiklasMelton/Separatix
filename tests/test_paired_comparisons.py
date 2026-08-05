@@ -18,12 +18,7 @@ def _singlelabel_probe_results(
     return {
         name: {
             "balanced_accuracy": float(
-                np.mean(
-                    [
-                        np.mean(values[y == cls] == cls)
-                        for cls in np.unique(y)
-                    ]
-                )
+                np.mean([np.mean(values[y == cls] == cls) for cls in np.unique(y)])
             ),
             "predictions": values.tolist(),
             "evaluation_plan_id": "plan",
@@ -56,9 +51,7 @@ def test_paired_comparison_is_deterministic_and_oriented() -> None:
         evaluation_plan_id="plan",
         evaluation_available=True,
     )
-    comparison = lookup_paired_comparison(
-        first, "linear", "dummy", "balanced_accuracy"
-    )
+    comparison = lookup_paired_comparison(first, "linear", "dummy", "balanced_accuracy")
 
     assert first == second
     assert comparison is not None
@@ -125,12 +118,12 @@ def test_real_probe_run_shares_rows_folds_and_plan_ids() -> None:
     ]
     assert evaluation["alignment_status"] == "aligned"
     assert len(evaluation["fold_assignments"]) == evaluation["n_samples"]
-    assert {
-        result["evaluation_plan_id"] for result in available
-    } == {evaluation["evaluation_plan_id"]}
-    assert {
-        tuple(result["sample_info"]["indices"]) for result in available
-    } == {tuple(evaluation["row_indices"])}
+    assert {result["evaluation_plan_id"] for result in available} == {
+        evaluation["evaluation_plan_id"]
+    }
+    assert {tuple(result["sample_info"]["indices"]) for result in available} == {
+        tuple(evaluation["row_indices"])
+    }
     assert report.metrics["paired_probe_comparisons"]["status"] == "available"
 
 
@@ -143,9 +136,7 @@ def test_multilabel_and_regression_runs_use_paired_evidence() -> None:
             (X[:, 1] + X[:, 2] > 0).astype(int),
         ]
     )
-    Y_regression = np.column_stack(
-        [X[:, 0] + 0.1 * rng.normal(size=90), X[:, 1] ** 2]
-    )
+    Y_regression = np.column_stack([X[:, 0] + 0.1 * rng.normal(size=90), X[:, 1] ** 2])
 
     multilabel = diagnose(
         X,
@@ -232,9 +223,9 @@ def test_sparse_warn_and_sample_uses_one_shared_probe_cohort() -> None:
     assert len(alignment_events) == 1
     assert alignment_events[0]["sampling_used"] is True
     assert len({result["evaluation_support"]["n_samples"] for result in available}) == 1
-    assert {
-        tuple(result["sample_info"]["indices"]) for result in available
-    } == {tuple(report.metrics["probe_evaluation"]["row_indices"])}
+    assert {tuple(result["sample_info"]["indices"]) for result in available} == {
+        tuple(report.metrics["probe_evaluation"]["row_indices"])
+    }
 
 
 def test_paired_evidence_drives_singlelabel_family_decision() -> None:
@@ -299,6 +290,6 @@ def test_fold_assignments_are_pruned_only_from_terse_report() -> None:
     )
 
     assert "fold_assignments" not in report.to_dict()["metrics"]["probe_evaluation"]
-    assert "fold_assignments" in report.to_dict(terse=False)["metrics"][
-        "probe_evaluation"
-    ]
+    assert (
+        "fold_assignments" in report.to_dict(terse=False)["metrics"]["probe_evaluation"]
+    )
