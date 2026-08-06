@@ -16,6 +16,8 @@ from separatix.models.mlp import (
     _evaluate_multilabel_models,
     _evaluate_regression_models,
     _evaluate_singlelabel_models,
+    _multilabel_override_evidence,
+    _regression_override_evidence,
     _resolve_device,
     _safe_evaluate_models,
     _singlelabel_override_evidence,
@@ -46,6 +48,10 @@ def test_default_report_marks_mlp_not_requested() -> None:
     assert report.metrics["mlp_probes"]["status"] == "not_requested"
     assert report.metrics["mlp_trigger_evidence"]["status"] == "not_requested"
     assert report.metrics["mlp_recommendation_evidence"]["status"] == "not_requested"
+    evidence = report.metrics["mlp_recommendation_evidence"]
+    assert evidence["override_policy"] == "paired_improvement_and_dummy_signal"
+    assert evidence["trigger_threshold_used_for_override"] is False
+    assert evidence["minimum_improvement"] == 0.02
 
 
 def test_good_simple_probe_prevents_mlp_trigger_even_when_requested() -> None:
@@ -277,7 +283,7 @@ def test_mlp_override_requires_clear_minimum_improvement(
         "dummy": {"balanced_accuracy": 0.5, "predictions": dummy},
         **{
             name: {"balanced_accuracy": 0.0, "predictions": inverse}
-            for name in ("linear", "smooth_poly", "knn")
+            for name in ("linear", "smooth_poly", "knn", "kernel_approx")
         },
     }
     successful = _singlelabel_override_evidence(
@@ -291,7 +297,7 @@ def test_mlp_override_requires_clear_minimum_improvement(
         "dummy": {"balanced_accuracy": 0.5, "predictions": dummy},
         **{
             name: {"balanced_accuracy": 1.0, "predictions": perfect}
-            for name in ("linear", "smooth_poly", "knn")
+            for name in ("linear", "smooth_poly", "knn", "kernel_approx")
         },
     }
     rejected = _singlelabel_override_evidence(
@@ -303,6 +309,242 @@ def test_mlp_override_requires_clear_minimum_improvement(
     )
     assert successful["recommendation_override"] is True
     assert rejected["recommendation_override"] is False
+    assert successful["pairwise_comparisons"]["linear"]["point_delta"] == 1.0
+
+
+def _singlelabel_decoupling_case() -> tuple[
+    np.ndarray, dict[str, dict[str, object]], dict[str, dict[str, object]]
+]:
+    """Return aligned evidence with clear gains but normalized skill below 0.75."""
+    y = np.asarray([0, 1] * 50)
+    dummy = np.zeros_like(y)
+    simpler = dummy.copy()
+    mlp = dummy.copy()
+    positive_rows = np.flatnonzero(y == 1)
+    simpler[positive_rows[:10]] = 1
+    mlp[positive_rows[:20]] = 1
+    mlp_results: dict[str, dict[str, object]] = {
+        "mlp_one_layer_compact": {
+            "balanced_accuracy": 0.7,
+            "predictions": mlp.tolist(),
+        }
+    }
+    comparator_results: dict[str, dict[str, object]] = {
+        "dummy": {"balanced_accuracy": 0.5, "predictions": dummy.tolist()},
+        **{
+            name: {
+                "balanced_accuracy": 0.6,
+                "predictions": simpler.tolist(),
+            }
+            for name in ("linear", "smooth_poly", "knn", "kernel_approx")
+        },
+    }
+    return y, mlp_results, comparator_results
+
+
+def test_completed_override_is_independent_of_trigger_threshold() -> None:
+    y, mlp_results, comparator_results = _singlelabel_decoupling_case()
+    outcomes = [
+        _singlelabel_override_evidence(
+            mlp_results,
+            comparator_results,
+            y_true=y,
+            config=ProfilerConfig(
+                mlp_probes=True,
+                budget="fast",
+                random_state=0,
+                mlp_trigger_skill_threshold=threshold,
+            ),
+            groups=None,
+        )
+        for threshold in (0.0, 1.0)
+    ]
+
+    assert [item["recommendation_override"] for item in outcomes] == [True, True]
+    assert outcomes[0]["absolute_skill"] == pytest.approx(0.4)
+    assert outcomes[0]["absolute_skill"] < 0.75
+    assert outcomes[0]["trigger_threshold_used_for_override"] is False
+    assert outcomes[0]["metrics_clearing_override"] == ["balanced_accuracy"]
+
+
+def test_singlelabel_override_compares_against_point_strongest_probe() -> None:
+    y = np.asarray([0, 1] * 20)
+    perfect = y.tolist()
+    inverse = (1 - y).tolist()
+    dummy = np.zeros_like(y).tolist()
+    comparators = {
+        "dummy": {"balanced_accuracy": 0.5, "predictions": dummy},
+        "linear": {"balanced_accuracy": 0.0, "predictions": inverse},
+        "smooth_poly": {"balanced_accuracy": 0.0, "predictions": inverse},
+        "knn": {"balanced_accuracy": 0.0, "predictions": inverse},
+        "kernel_approx": {"balanced_accuracy": 1.0, "predictions": perfect},
+    }
+    evidence = _singlelabel_override_evidence(
+        {
+            "mlp_one_layer_compact": {
+                "balanced_accuracy": 1.0,
+                "predictions": perfect,
+            }
+        },
+        comparators,
+        y_true=y,
+        config=ProfilerConfig(mlp_probes=True, budget="fast", random_state=0),
+        groups=None,
+    )
+
+    assert evidence["strongest_simpler_probe_by_metric"] == {
+        "balanced_accuracy": "kernel_approx"
+    }
+    assert evidence["recommendation_override"] is False
+    assert evidence["metrics_beating_dummy"] == ["balanced_accuracy"]
+    assert evidence["metrics_beating_strongest_simpler"] == []
+
+
+def test_singlelabel_override_requires_paired_dummy_signal() -> None:
+    y = np.asarray([0, 1] * 20)
+    dummy = np.zeros_like(y).tolist()
+    inverse = (1 - y).tolist()
+    evidence = _singlelabel_override_evidence(
+        {
+            "mlp_one_layer_compact": {
+                "balanced_accuracy": 0.5,
+                "predictions": dummy,
+            }
+        },
+        {
+            "dummy": {"balanced_accuracy": 0.5, "predictions": dummy},
+            **{
+                name: {"balanced_accuracy": 0.0, "predictions": inverse}
+                for name in ("linear", "smooth_poly", "knn", "kernel_approx")
+            },
+        },
+        y_true=y,
+        config=ProfilerConfig(mlp_probes=True, budget="fast", random_state=0),
+        groups=None,
+    )
+
+    assert evidence["metrics_beating_strongest_simpler"] == ["balanced_accuracy"]
+    assert evidence["metrics_beating_dummy"] == []
+    assert evidence["recommendation_override"] is False
+    assert "dummy baseline" in evidence["override_reason"]
+
+
+@pytest.mark.parametrize("failure", ["missing", "runtime", "misaligned", "metric"])
+def test_singlelabel_override_requires_complete_comparator_evidence(
+    failure: str,
+) -> None:
+    y, mlp_results, comparator_results = _singlelabel_decoupling_case()
+    if failure == "missing":
+        del comparator_results["kernel_approx"]
+    elif failure == "runtime":
+        comparator_results["kernel_approx"] = {"status": "runtime_failed"}
+    elif failure == "misaligned":
+        comparator_results["kernel_approx"]["predictions"] = [0]
+    else:
+        del comparator_results["kernel_approx"]["balanced_accuracy"]
+
+    evidence = _singlelabel_override_evidence(
+        mlp_results,
+        comparator_results,
+        y_true=y,
+        config=ProfilerConfig(mlp_probes=True, budget="fast", random_state=0),
+        groups=None,
+    )
+
+    assert evidence["required_comparators_complete"] is False
+    assert evidence["missing_or_failed_comparators"] == ["kernel_approx"]
+    assert evidence["recommendation_override"] is False
+
+
+def _fixed_positive_bootstrap(*args, **kwargs) -> dict[str, float]:
+    """Return a positive interval so point deltas isolate override aggregation."""
+    return {"mean_delta": 0.1, "lower_95": 0.05, "upper_95": 0.15}
+
+
+@pytest.mark.parametrize("qualifying_metrics, expected", [(2, True), (1, False)])
+def test_multilabel_override_requires_two_jointly_qualifying_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+    qualifying_metrics: int,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(mlp_module, "_bootstrap_comparison", _fixed_positive_bootstrap)
+    metric_names = ("micro_f1", "macro_f1", "sample_jaccard")
+    Y = np.zeros((20, 3), dtype=int)
+    mlp_scores = {metric: 0.6 for metric in metric_names}
+    simple_scores = {
+        metric: 0.5 if index < qualifying_metrics else 0.6
+        for index, metric in enumerate(metric_names)
+    }
+    predictions = Y.tolist()
+    evidence = _multilabel_override_evidence(
+        {
+            "mlp_one_layer_compact": {
+                **mlp_scores,
+                "predictions": predictions,
+            }
+        },
+        {
+            "dummy": {
+                **{metric: 0.0 for metric in metric_names},
+                "predictions": predictions,
+            },
+            **{
+                name: {**simple_scores, "predictions": predictions}
+                for name in ("linear", "smooth_poly", "knn", "kernel_approx")
+            },
+        },
+        Y_true=Y,
+        label_names=np.asarray(["a", "b", "c"]),
+        config=ProfilerConfig(mlp_probes=True, budget="fast", random_state=0),
+        groups=None,
+    )
+
+    assert evidence["recommendation_override"] is expected
+    assert len(evidence["metrics_clearing_override"]) == qualifying_metrics
+    assert evidence["required_metrics_to_override"] == 2
+
+
+@pytest.mark.parametrize("qualifying_metrics, expected", [(2, True), (1, False)])
+def test_regression_override_requires_both_jointly_qualifying_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+    qualifying_metrics: int,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(mlp_module, "_bootstrap_comparison", _fixed_positive_bootstrap)
+    metric_names = ("r2_variance_weighted", "r2_uniform_average")
+    Y = np.zeros((20, 2), dtype=float)
+    mlp_scores = {metric: 0.6 for metric in metric_names}
+    simple_scores = {
+        metric: 0.5 if index < qualifying_metrics else 0.6
+        for index, metric in enumerate(metric_names)
+    }
+    predictions = Y.tolist()
+    evidence = _regression_override_evidence(
+        {
+            "mlp_one_layer_compact": {
+                **mlp_scores,
+                "predictions": predictions,
+            }
+        },
+        {
+            "dummy": {
+                **{metric: 0.0 for metric in metric_names},
+                "predictions": predictions,
+            },
+            **{
+                name: {**simple_scores, "predictions": predictions}
+                for name in ("linear", "smooth_poly", "knn", "kernel_approx")
+            },
+        },
+        Y_true=Y,
+        target_names=np.asarray(["one", "two"]),
+        config=ProfilerConfig(mlp_probes=True, budget="fast", random_state=0),
+        groups=None,
+    )
+
+    assert evidence["recommendation_override"] is expected
+    assert len(evidence["metrics_clearing_override"]) == qualifying_metrics
+    assert evidence["required_metrics_to_override"] == 2
 
 
 def test_mlp_parameter_cap_and_device_fallbacks() -> None:
@@ -422,7 +664,8 @@ def test_singlelabel_mlp_completed_path_disables_override_after_partial_failure(
     )
     assert result["status"] == "completed"
     assert result["recommendation_override"] is False
-    assert result["required_comparators_complete"] is False
+    assert result["required_comparators_complete"] is True
+    assert result["architectures_complete"] is False
     assert any(
         item.get("status") == "runtime_failed" for item in result["architectures"]
     )

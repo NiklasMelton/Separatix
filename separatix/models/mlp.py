@@ -96,6 +96,14 @@ _MLP_HIDDEN_LABELS = (
 )
 _MLP_RUNTIME_DIM_WARNING = 2048
 _MLP_RUNTIME_WORK_WARNING = 1e12
+_REQUIRED_MLP_COMPARATORS = (
+    "dummy",
+    "linear",
+    "smooth_poly",
+    "knn",
+    "kernel_approx",
+)
+_SIMPLER_MLP_COMPARATORS = _REQUIRED_MLP_COMPARATORS[1:]
 
 
 def _torch_module() -> Any | None:
@@ -142,8 +150,20 @@ def _default_mlp_artifacts(config: ProfilerConfig) -> dict[str, Any]:
         "best_architecture": None,
         "pairwise_comparisons": {},
         "required_comparators_complete": False,
+        "architectures_complete": None,
         "recommendation_override": False,
         "override_reason": None,
+        "override_policy": "paired_improvement_and_dummy_signal",
+        "trigger_threshold_used_for_override": False,
+        "minimum_improvement": float(config.mlp_min_improvement),
+        "required_comparators": list(_REQUIRED_MLP_COMPARATORS),
+        "missing_or_failed_comparators": [],
+        "strongest_simpler_probe_by_metric": {},
+        "metrics_beating_strongest_simpler": [],
+        "metrics_beating_dummy": [],
+        "metrics_clearing_override": [],
+        "required_metrics_to_override": None,
+        "absolute_skill_by_metric": {},
     }
 
 
@@ -1176,10 +1196,19 @@ def _objective_score(result: dict[str, Any], *, metrics: tuple[str, ...]) -> flo
     return float(np.mean(values)) if values else float("-inf")
 
 
+def _finite_metric(result: dict[str, Any], metric: str) -> bool:
+    """Return whether a result contains one finite numeric metric."""
+    try:
+        return metric in result and bool(np.isfinite(float(result[metric])))
+    except (TypeError, ValueError):
+        return False
+
+
 def _select_best_architecture(
     architecture_results: dict[str, dict[str, Any]],
     *,
     metrics: tuple[str, ...],
+    n_rows: int,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Select the MLP architecture using conservative ties."""
     usable_results = {
@@ -1187,6 +1216,8 @@ def _select_best_architecture(
         for name, result in architecture_results.items()
         if result.get("status") != "runtime_failed"
         and result.get("predictions") is not None
+        and np.asarray(result["predictions"]).shape[0] == n_rows
+        and all(_finite_metric(result, metric) for metric in metrics)
         and _objective_score(result, metrics=metrics) != float("-inf")
     }
     if not usable_results:
@@ -1203,6 +1234,128 @@ def _select_best_architecture(
     return name, result
 
 
+def _missing_or_failed_comparators(
+    comparator_results: dict[str, dict[str, Any]],
+    *,
+    metrics: tuple[str, ...],
+    n_rows: int,
+) -> list[str]:
+    """Return required comparators lacking complete aligned held-out evidence."""
+    missing: list[str] = []
+    for name in _REQUIRED_MLP_COMPARATORS:
+        result = comparator_results.get(name)
+        if result is None or result.get("status") == "runtime_failed":
+            missing.append(name)
+            continue
+        predictions = result.get("predictions")
+        if predictions is None or np.asarray(predictions).shape[0] != n_rows:
+            missing.append(name)
+            continue
+        if any(not _finite_metric(result, metric) for metric in metrics):
+            missing.append(name)
+    return missing
+
+
+def _strongest_simpler_by_metric(
+    comparator_results: dict[str, dict[str, Any]],
+    *,
+    metrics: tuple[str, ...],
+) -> dict[str, str]:
+    """Return the point-best non-dummy comparator for each primary metric."""
+    strongest: dict[str, str] = {}
+    for metric in metrics:
+        candidates = [
+            name
+            for name in _SIMPLER_MLP_COMPARATORS
+            if _finite_metric(comparator_results.get(name, {}), metric)
+        ]
+        if candidates:
+            # ``max`` preserves the declared simple-to-complex order for exact ties.
+            strongest[metric] = max(
+                candidates,
+                key=lambda name: float(comparator_results[name][metric]),
+            )
+    return strongest
+
+
+def _absolute_skill_by_metric(
+    best_result: dict[str, Any],
+    comparator_results: dict[str, dict[str, Any]],
+    *,
+    metrics: tuple[str, ...],
+) -> dict[str, float | None]:
+    """Return descriptive normalized MLP skill above dummy by metric."""
+    dummy = comparator_results.get("dummy", {})
+    return {
+        metric: _skill_from_bounds(
+            float(best_result[metric]) if _finite_metric(best_result, metric) else None,
+            float(dummy[metric]) if _finite_metric(dummy, metric) else None,
+        )
+        for metric in metrics
+    }
+
+
+def _override_report_fields(
+    *,
+    config: ProfilerConfig,
+    strongest: dict[str, str],
+    beating_strongest: list[str],
+    beating_dummy: list[str],
+    clearing: list[str],
+    required_metrics: int,
+    missing_comparators: list[str],
+    absolute_skill: dict[str, float | None],
+) -> dict[str, Any]:
+    """Return common transparent fields for an MLP override decision."""
+    return {
+        "override_policy": "paired_improvement_and_dummy_signal",
+        "trigger_threshold_used_for_override": False,
+        "minimum_improvement": float(config.mlp_min_improvement),
+        "required_comparators": list(_REQUIRED_MLP_COMPARATORS),
+        "missing_or_failed_comparators": missing_comparators,
+        "strongest_simpler_probe_by_metric": strongest,
+        "metrics_beating_strongest_simpler": beating_strongest,
+        "metrics_beating_dummy": beating_dummy,
+        "metrics_clearing_override": clearing,
+        "required_metrics_to_override": int(required_metrics),
+        "absolute_skill_by_metric": absolute_skill,
+    }
+
+
+def _failed_override_reason(
+    *,
+    missing_comparators: list[str],
+    beating_strongest: list[str],
+    beating_dummy: list[str],
+    clearing: list[str],
+    required_metrics: int,
+) -> str:
+    """Explain the first decisive MLP override gate that did not clear."""
+    if missing_comparators:
+        return (
+            "MLP override was disabled because complete aligned held-out evidence "
+            "was unavailable for required comparators: "
+            + ", ".join(missing_comparators)
+            + "."
+        )
+    if len(beating_dummy) < required_metrics:
+        return (
+            "The best MLP architecture did not show sufficient paired signal "
+            "above the dummy baseline on the required primary metrics."
+        )
+    if len(beating_strongest) < required_metrics:
+        return (
+            "The best MLP architecture did not clearly improve over the strongest "
+            "simpler probe on the required primary metrics."
+        )
+    if len(clearing) < required_metrics:
+        return (
+            "The best MLP architecture did not clear both the paired dummy-signal "
+            "and strongest-simpler gates on enough of the same primary metrics."
+        )
+    return "The MLP override criteria were not satisfied."
+
+
 def _singlelabel_override_evidence(
     mlp_results: dict[str, dict[str, Any]],
     comparator_results: dict[str, dict[str, Any]],
@@ -1212,28 +1365,54 @@ def _singlelabel_override_evidence(
     groups: np.ndarray | None,
 ) -> dict[str, Any]:
     """Return single-label MLP recommendation evidence."""
+    metric_names = ("balanced_accuracy",)
+    required_metrics = 1
+    missing_comparators = _missing_or_failed_comparators(
+        comparator_results,
+        metrics=metric_names,
+        n_rows=y_true.shape[0],
+    )
+    required_complete = not missing_comparators
+    strongest = (
+        _strongest_simpler_by_metric(comparator_results, metrics=metric_names)
+        if required_complete
+        else {}
+    )
     best_name, best_result = _select_best_architecture(
         mlp_results,
-        metrics=("balanced_accuracy",),
+        metrics=metric_names,
+        n_rows=y_true.shape[0],
     )
     if best_name is None or best_result is None:
         return {
             "status": "completed",
             "recommendation_override": False,
-            "override_reason": "No MLP architecture completed.",
+            "override_reason": (
+                "No MLP architecture produced complete aligned held-out evidence."
+            ),
             "pairwise_comparisons": {},
             "best_architecture": None,
-            "required_comparators_complete": False,
+            "required_comparators_complete": required_complete,
+            "architectures_complete": False,
+            **_override_report_fields(
+                config=config,
+                strongest=strongest,
+                beating_strongest=[],
+                beating_dummy=[],
+                clearing=[],
+                required_metrics=required_metrics,
+                missing_comparators=missing_comparators,
+                absolute_skill={},
+            ),
         }
     pairwise: dict[str, Any] = {}
-    required_complete = all(
-        name in comparator_results for name in ("linear", "smooth_poly", "knn")
-    )
     best_predictions = np.asarray(best_result["predictions"], dtype=int)
     for name, result in comparator_results.items():
-        if "predictions" not in result:
+        if "predictions" not in result or "balanced_accuracy" not in result:
             continue
         comparator_predictions = np.asarray(result["predictions"], dtype=int)
+        if comparator_predictions.shape[0] != y_true.shape[0]:
+            continue
 
         def delta(
             sample_idx: np.ndarray, second: np.ndarray = comparator_predictions
@@ -1252,31 +1431,47 @@ def _singlelabel_override_evidence(
             n_rows=y_true.shape[0],
             groups=groups,
         )
+        comparison["point_delta"] = float(best_result["balanced_accuracy"]) - float(
+            result["balanced_accuracy"]
+        )
         comparison["clear_advantage"] = bool(
-            comparison["mean_delta"] >= config.mlp_min_improvement
+            comparison["point_delta"] >= config.mlp_min_improvement
             and comparison["lower_95"] > 0.0
         )
         pairwise[name] = comparison
-    absolute_skill = _skill_from_bounds(
-        float(best_result["balanced_accuracy"]),
-        float(comparator_results["dummy"]["balanced_accuracy"]),
+    beating_strongest = [
+        metric
+        for metric, comparator in strongest.items()
+        if pairwise.get(comparator, {}).get("clear_advantage")
+    ]
+    beating_dummy = (
+        ["balanced_accuracy"]
+        if pairwise.get("dummy", {}).get("clear_advantage")
+        else []
+    )
+    clearing = sorted(set(beating_strongest) & set(beating_dummy))
+    absolute_skill = _absolute_skill_by_metric(
+        best_result,
+        comparator_results,
+        metrics=metric_names,
     )
     override = bool(
-        absolute_skill is not None
-        and absolute_skill >= config.mlp_trigger_skill_threshold
-        and required_complete
-        and pairwise
-        and all(
-            item["clear_advantage"] for item in pairwise.values() if item is not None
-        )
+        required_complete and len(clearing) >= required_metrics
     )
     return {
         "status": "completed",
         "recommendation_override": override,
         "override_reason": (
-            "The best MLP architecture clearly improved over every aligned simpler probe."
+            "The best MLP architecture showed paired signal above dummy and clearly "
+            "improved over the strongest aligned simpler probe."
             if override
-            else "No MLP architecture cleared the configured absolute-skill and pairwise-improvement thresholds."
+            else _failed_override_reason(
+                missing_comparators=missing_comparators,
+                beating_strongest=beating_strongest,
+                beating_dummy=beating_dummy,
+                clearing=clearing,
+                required_metrics=required_metrics,
+            )
         ),
         "pairwise_comparisons": pairwise,
         "best_architecture": {
@@ -1284,7 +1479,18 @@ def _singlelabel_override_evidence(
             "balanced_accuracy": float(best_result["balanced_accuracy"]),
         },
         "required_comparators_complete": required_complete,
-        "absolute_skill": absolute_skill,
+        "architectures_complete": True,
+        "absolute_skill": absolute_skill["balanced_accuracy"],
+        **_override_report_fields(
+            config=config,
+            strongest=strongest,
+            beating_strongest=beating_strongest,
+            beating_dummy=beating_dummy,
+            clearing=clearing,
+            required_metrics=required_metrics,
+            missing_comparators=missing_comparators,
+            absolute_skill=absolute_skill,
+        ),
     }
 
 
@@ -1299,29 +1505,57 @@ def _multilabel_override_evidence(
 ) -> dict[str, Any]:
     """Return multilabel MLP recommendation evidence."""
     metric_names = ("micro_f1", "macro_f1", "sample_jaccard")
+    required_metrics = 2
+    missing_comparators = _missing_or_failed_comparators(
+        comparator_results,
+        metrics=metric_names,
+        n_rows=Y_true.shape[0],
+    )
+    required_complete = not missing_comparators
+    strongest = (
+        _strongest_simpler_by_metric(comparator_results, metrics=metric_names)
+        if required_complete
+        else {}
+    )
     best_name, best_result = _select_best_architecture(
-        mlp_results, metrics=metric_names
+        mlp_results,
+        metrics=metric_names,
+        n_rows=Y_true.shape[0],
     )
     if best_name is None or best_result is None:
         return {
             "status": "completed",
             "recommendation_override": False,
-            "override_reason": "No MLP architecture completed.",
+            "override_reason": (
+                "No MLP architecture produced complete aligned held-out evidence."
+            ),
             "pairwise_comparisons": {},
             "best_architecture": None,
-            "required_comparators_complete": False,
+            "required_comparators_complete": required_complete,
+            "architectures_complete": False,
+            **_override_report_fields(
+                config=config,
+                strongest=strongest,
+                beating_strongest=[],
+                beating_dummy=[],
+                clearing=[],
+                required_metrics=required_metrics,
+                missing_comparators=missing_comparators,
+                absolute_skill={},
+            ),
         }
     pairwise: dict[str, Any] = {}
-    required_complete = all(
-        name in comparator_results for name in ("linear", "smooth_poly", "knn")
-    )
     best_predictions = np.asarray(best_result["predictions"], dtype=np.int8)
     for name, result in comparator_results.items():
         if "predictions" not in result:
             continue
         comparator_predictions = np.asarray(result["predictions"], dtype=np.int8)
+        if comparator_predictions.shape[0] != Y_true.shape[0]:
+            continue
         metric_comparisons: dict[str, Any] = {}
         for metric in metric_names:
+            if metric not in result:
+                continue
 
             def delta(
                 sample_idx: np.ndarray,
@@ -1344,37 +1578,53 @@ def _multilabel_override_evidence(
                 n_rows=Y_true.shape[0],
                 groups=groups,
             )
+            comparison["point_delta"] = float(best_result[metric]) - float(
+                result[metric]
+            )
             comparison["clear_advantage"] = bool(
-                comparison["mean_delta"] >= config.mlp_min_improvement
+                comparison["point_delta"] >= config.mlp_min_improvement
                 and comparison["lower_95"] > 0.0
             )
             metric_comparisons[metric] = comparison
         pairwise[name] = metric_comparisons
-    dummy = comparator_results["dummy"]
-    threshold_hits = 0
-    for metric in metric_names:
-        skill = _skill_from_bounds(float(best_result[metric]), float(dummy[metric]))
-        if skill is not None and skill >= config.mlp_trigger_skill_threshold:
-            threshold_hits += 1
+    beating_strongest = [
+        metric
+        for metric, comparator in strongest.items()
+        if pairwise.get(comparator, {}).get(metric, {}).get("clear_advantage")
+    ]
+    beating_dummy = [
+        metric
+        for metric in metric_names
+        if pairwise.get("dummy", {}).get(metric, {}).get("clear_advantage")
+    ]
+    clearing = [
+        metric
+        for metric in metric_names
+        if metric in beating_strongest and metric in beating_dummy
+    ]
+    absolute_skill = _absolute_skill_by_metric(
+        best_result,
+        comparator_results,
+        metrics=metric_names,
+    )
     override = bool(
-        threshold_hits >= 2
-        and required_complete
-        and pairwise
-        and all(
-            sum(
-                1 for metric in metric_names if metric_result[metric]["clear_advantage"]
-            )
-            >= 2
-            for metric_result in pairwise.values()
-        )
+        required_complete and len(clearing) >= required_metrics
     )
     return {
         "status": "completed",
         "recommendation_override": override,
         "override_reason": (
-            "The best MLP architecture clearly improved over every aligned simpler probe on at least two primary multilabel metrics."
+            "The best MLP architecture showed paired signal above dummy and clearly "
+            "improved over the strongest aligned simpler probe on at least two "
+            "primary multilabel metrics."
             if override
-            else "No MLP architecture cleared the configured multilabel skill and pairwise-improvement thresholds."
+            else _failed_override_reason(
+                missing_comparators=missing_comparators,
+                beating_strongest=beating_strongest,
+                beating_dummy=beating_dummy,
+                clearing=clearing,
+                required_metrics=required_metrics,
+            )
         ),
         "pairwise_comparisons": pairwise,
         "best_architecture": {
@@ -1384,6 +1634,17 @@ def _multilabel_override_evidence(
             "sample_jaccard": float(best_result["sample_jaccard"]),
         },
         "required_comparators_complete": required_complete,
+        "architectures_complete": True,
+        **_override_report_fields(
+            config=config,
+            strongest=strongest,
+            beating_strongest=beating_strongest,
+            beating_dummy=beating_dummy,
+            clearing=clearing,
+            required_metrics=required_metrics,
+            missing_comparators=missing_comparators,
+            absolute_skill=absolute_skill,
+        ),
     }
 
 
@@ -1398,29 +1659,57 @@ def _regression_override_evidence(
 ) -> dict[str, Any]:
     """Return regression MLP recommendation evidence."""
     metric_names = ("r2_variance_weighted", "r2_uniform_average")
+    required_metrics = len(metric_names)
+    missing_comparators = _missing_or_failed_comparators(
+        comparator_results,
+        metrics=metric_names,
+        n_rows=Y_true.shape[0],
+    )
+    required_complete = not missing_comparators
+    strongest = (
+        _strongest_simpler_by_metric(comparator_results, metrics=metric_names)
+        if required_complete
+        else {}
+    )
     best_name, best_result = _select_best_architecture(
-        mlp_results, metrics=metric_names
+        mlp_results,
+        metrics=metric_names,
+        n_rows=Y_true.shape[0],
     )
     if best_name is None or best_result is None:
         return {
             "status": "completed",
             "recommendation_override": False,
-            "override_reason": "No MLP architecture completed.",
+            "override_reason": (
+                "No MLP architecture produced complete aligned held-out evidence."
+            ),
             "pairwise_comparisons": {},
             "best_architecture": None,
-            "required_comparators_complete": False,
+            "required_comparators_complete": required_complete,
+            "architectures_complete": False,
+            **_override_report_fields(
+                config=config,
+                strongest=strongest,
+                beating_strongest=[],
+                beating_dummy=[],
+                clearing=[],
+                required_metrics=required_metrics,
+                missing_comparators=missing_comparators,
+                absolute_skill={},
+            ),
         }
     pairwise: dict[str, Any] = {}
-    required_complete = all(
-        name in comparator_results for name in ("linear", "smooth_poly", "knn")
-    )
     best_predictions = np.asarray(best_result["predictions"], dtype=float)
     for name, result in comparator_results.items():
         if "predictions" not in result:
             continue
         comparator_predictions = np.asarray(result["predictions"], dtype=float)
+        if comparator_predictions.shape[0] != Y_true.shape[0]:
+            continue
         metric_comparisons: dict[str, Any] = {}
         for metric in metric_names:
+            if metric not in result:
+                continue
 
             def delta(
                 sample_idx: np.ndarray,
@@ -1443,37 +1732,53 @@ def _regression_override_evidence(
                 n_rows=Y_true.shape[0],
                 groups=groups,
             )
+            comparison["point_delta"] = float(best_result[metric]) - float(
+                result[metric]
+            )
             comparison["clear_advantage"] = bool(
-                comparison["mean_delta"] >= config.mlp_min_improvement
+                comparison["point_delta"] >= config.mlp_min_improvement
                 and comparison["lower_95"] > 0.0
             )
             metric_comparisons[metric] = comparison
         pairwise[name] = metric_comparisons
-    dummy = comparator_results["dummy"]
-    threshold_hits = 0
-    for metric in metric_names:
-        skill = _skill_from_bounds(
-            min(1.0, float(best_result[metric])),
-            min(1.0, float(dummy[metric])),
-        )
-        if skill is not None and skill >= config.mlp_trigger_skill_threshold:
-            threshold_hits += 1
+    beating_strongest = [
+        metric
+        for metric, comparator in strongest.items()
+        if pairwise.get(comparator, {}).get(metric, {}).get("clear_advantage")
+    ]
+    beating_dummy = [
+        metric
+        for metric in metric_names
+        if pairwise.get("dummy", {}).get(metric, {}).get("clear_advantage")
+    ]
+    clearing = [
+        metric
+        for metric in metric_names
+        if metric in beating_strongest and metric in beating_dummy
+    ]
+    absolute_skill = _absolute_skill_by_metric(
+        best_result,
+        comparator_results,
+        metrics=metric_names,
+    )
     override = bool(
-        threshold_hits == len(metric_names)
-        and required_complete
-        and pairwise
-        and all(
-            all(metric_result[metric]["clear_advantage"] for metric in metric_names)
-            for metric_result in pairwise.values()
-        )
+        required_complete and len(clearing) >= required_metrics
     )
     return {
         "status": "completed",
         "recommendation_override": override,
         "override_reason": (
-            "The best MLP architecture clearly improved over every aligned simpler regressor on both primary R2 metrics."
+            "The best MLP architecture showed paired signal above dummy and clearly "
+            "improved over the strongest aligned simpler regressor on both primary "
+            "R2 metrics."
             if override
-            else "No MLP architecture cleared the configured regression skill and pairwise-improvement thresholds."
+            else _failed_override_reason(
+                missing_comparators=missing_comparators,
+                beating_strongest=beating_strongest,
+                beating_dummy=beating_dummy,
+                clearing=clearing,
+                required_metrics=required_metrics,
+            )
         ),
         "pairwise_comparisons": pairwise,
         "best_architecture": {
@@ -1482,6 +1787,17 @@ def _regression_override_evidence(
             "r2_uniform_average": float(best_result["r2_uniform_average"]),
         },
         "required_comparators_complete": required_complete,
+        "architectures_complete": True,
+        **_override_report_fields(
+            config=config,
+            strongest=strongest,
+            beating_strongest=beating_strongest,
+            beating_dummy=beating_dummy,
+            clearing=clearing,
+            required_metrics=required_metrics,
+            missing_comparators=missing_comparators,
+            absolute_skill=absolute_skill,
+        ),
     }
 
 
@@ -1766,7 +2082,7 @@ def maybe_run_singlelabel_mlp_probes(
     )
     if any(result.get("status") == "runtime_failed" for result in mlp_results.values()):
         recommendation["recommendation_override"] = False
-        recommendation["required_comparators_complete"] = False
+        recommendation["architectures_complete"] = False
         recommendation["override_reason"] = (
             "At least one requested MLP architecture failed, so override evidence "
             "was incomplete."
@@ -2050,7 +2366,7 @@ def maybe_run_multilabel_mlp_probes(
     )
     if any(result.get("status") == "runtime_failed" for result in mlp_results.values()):
         recommendation["recommendation_override"] = False
-        recommendation["required_comparators_complete"] = False
+        recommendation["architectures_complete"] = False
         recommendation["override_reason"] = (
             "At least one requested MLP architecture failed, so override evidence "
             "was incomplete."
@@ -2312,7 +2628,7 @@ def maybe_run_regression_mlp_probes(
     )
     if any(result.get("status") == "runtime_failed" for result in mlp_results.values()):
         recommendation["recommendation_override"] = False
-        recommendation["required_comparators_complete"] = False
+        recommendation["architectures_complete"] = False
         recommendation["override_reason"] = (
             "At least one requested MLP architecture failed, so override evidence "
             "was incomplete."
