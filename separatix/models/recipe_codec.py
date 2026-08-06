@@ -154,6 +154,7 @@ def _decode_value(value: Any) -> Any:
 
 def _lazy_torch_factory(key: str) -> Callable[..., BaseEstimator]:
     """Return a decoder that imports the optional MLP module only on demand."""
+
     def factory(**params: Any) -> BaseEstimator:
         try:
             from separatix.models.mlp import TorchMLPClassifier, TorchMLPRegressor

@@ -723,9 +723,7 @@ def run_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
-        _mark_unavailable_probe_recipe(
-            results["smooth_poly"], dense_unavailable_reason
-        )
+        _mark_unavailable_probe_recipe(results["smooth_poly"], dense_unavailable_reason)
     else:
         dense_y = y_used
         dense_groups = groups_used
@@ -1226,9 +1224,7 @@ def run_regression_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
-        _mark_unavailable_probe_recipe(
-            results["smooth_poly"], dense_unavailable_reason
-        )
+        _mark_unavailable_probe_recipe(results["smooth_poly"], dense_unavailable_reason)
     else:
         dense_Y = Y_used
         dense_groups = groups_used
@@ -1662,9 +1658,7 @@ def run_multilabel_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
-        _mark_unavailable_probe_recipe(
-            results["smooth_poly"], dense_unavailable_reason
-        )
+        _mark_unavailable_probe_recipe(results["smooth_poly"], dense_unavailable_reason)
     else:
         dense_Y = Y_used
         dtype = dense_X.dtype if dense_X.dtype is not None else np.dtype(float)

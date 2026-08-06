@@ -158,8 +158,10 @@ def _validate_recipe_payload(
             raise ProbeRecipeError(
                 f"Probe metadata field {key!r} must be a non-empty string."
             )
-    if "variant" in probe and probe["variant"] is not None and not isinstance(
-        probe["variant"], str
+    if (
+        "variant" in probe
+        and probe["variant"] is not None
+        and not isinstance(probe["variant"], str)
     ):
         raise ProbeRecipeError("Probe metadata variant must be a string or null.")
 
