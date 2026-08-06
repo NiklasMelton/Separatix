@@ -48,6 +48,27 @@ print(report.scores)
 print(report.to_json())
 ```
 
+### Experimental protocol: diagnose twice
+
+When a final test set is reserved, run Separatix at the two training sizes that
+matter:
+
+1. Run it on the selection cohort before choosing and tuning candidate model
+   families against validation data.
+2. After validation-based comparison and tuning are complete, combine the
+   training and validation cohorts, rerun Separatix on that enlarged development
+   cohort, and record the second report before fitting the final model.
+
+The first report supports selection-time reasoning. The second is a
+final-fit-size diagnostic and may inform the final model specification when the
+apparent geometry changes with more training data. Neither run should receive
+test rows or test labels. Make every remaining decision before evaluating the
+final fitted model once on the untouched test set; that test is the independent
+assessment of the complete procedure.
+
+See the [two-stage experimental protocol](docs/quickstart.md#two-stage-experimental-protocol)
+for an example and interpretation guidance.
+
 ## What It Accepts
 
 - Dense NumPy arrays
