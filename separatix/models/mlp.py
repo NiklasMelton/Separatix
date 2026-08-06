@@ -1455,9 +1455,7 @@ def _singlelabel_override_evidence(
         comparator_results,
         metrics=metric_names,
     )
-    override = bool(
-        required_complete and len(clearing) >= required_metrics
-    )
+    override = bool(required_complete and len(clearing) >= required_metrics)
     return {
         "status": "completed",
         "recommendation_override": override,
@@ -1607,9 +1605,7 @@ def _multilabel_override_evidence(
         comparator_results,
         metrics=metric_names,
     )
-    override = bool(
-        required_complete and len(clearing) >= required_metrics
-    )
+    override = bool(required_complete and len(clearing) >= required_metrics)
     return {
         "status": "completed",
         "recommendation_override": override,
@@ -1761,9 +1757,7 @@ def _regression_override_evidence(
         comparator_results,
         metrics=metric_names,
     )
-    override = bool(
-        required_complete and len(clearing) >= required_metrics
-    )
+    override = bool(required_complete and len(clearing) >= required_metrics)
     return {
         "status": "completed",
         "recommendation_override": override,
