@@ -378,6 +378,163 @@ def _family_comparison(
     }
 
 
+def _plausible_family_decision_method(methods: set[str]) -> str | None:
+    """Summarize the uncertainty method used to construct a family frontier."""
+    usable = methods & {
+        "paired_oof_bootstrap",
+        "marginal_standard_error_fallback",
+    }
+    if len(usable) > 1:
+        return "mixed"
+    return next(iter(usable), None)
+
+
+def _inactive_plausible_family_set(
+    families: dict[str, bool],
+    *,
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Return an empty, inspectable plausible-family result."""
+    return {
+        "status": status,
+        "scope": "core_probe_families",
+        "minimum_recommended_family": None,
+        "plausible_families": [],
+        "decision_method": None,
+        "reason": reason,
+        "assessments": {
+            family: {
+                "available": bool(families[family]),
+                "eligible_by_complexity": False,
+                "plausible": False,
+                "reason": reason,
+                "dominated_by": [],
+                "clearly_worse_metrics": [],
+            }
+            for family in _FAMILY_ORDER
+        },
+    }
+
+
+def _singlelabel_plausible_family_set(
+    families: dict[str, _FamilyEvidence],
+    *,
+    minimum_family: str | None,
+    signal_available: bool,
+    blocking: bool,
+    paired_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the uncertainty-aware competitive frontier for classification."""
+    availability = {
+        family: bool(families[family].available) for family in _FAMILY_ORDER
+    }
+    if blocking:
+        return _inactive_plausible_family_set(
+            availability,
+            status="not_applicable",
+            reason="Blocking evidence prevents a model-family interpretation.",
+        )
+    if not signal_available:
+        return _inactive_plausible_family_set(
+            availability,
+            status="not_applicable",
+            reason="The predictive signal gate did not clear the dummy baseline.",
+        )
+
+    minimum_rank = (
+        _FAMILY_ORDER.index(minimum_family) if minimum_family is not None else 0
+    )
+    required = list(_FAMILY_ORDER[minimum_rank:])
+    missing = [family for family in required if not availability[family]]
+    if missing:
+        result = _inactive_plausible_family_set(
+            availability,
+            status="unavailable",
+            reason=(
+                "The competitive frontier could not be constructed because "
+                "required core-family probes were unavailable: "
+                + ", ".join(missing)
+                + "."
+            ),
+        )
+        result["minimum_recommended_family"] = minimum_family
+        for family in _FAMILY_ORDER:
+            eligible = _FAMILY_ORDER.index(family) >= minimum_rank
+            result["assessments"][family]["eligible_by_complexity"] = eligible
+            if not eligible:
+                result["assessments"][family]["reason"] = (
+                    "Excluded because it is simpler than the minimum "
+                    "recommended family."
+                )
+        return result
+
+    methods: set[str] = set()
+    assessments: dict[str, Any] = {}
+    plausible: list[str] = []
+    eligible_families = [
+        family
+        for family in _FAMILY_ORDER
+        if _FAMILY_ORDER.index(family) >= minimum_rank
+    ]
+    for family in _FAMILY_ORDER:
+        eligible = family in eligible_families
+        dominated_by: list[str] = []
+        if eligible:
+            for other in eligible_families:
+                if other == family:
+                    continue
+                comparison = _family_comparison(
+                    families[other], families[family], paired_payload
+                )
+                methods.add(str(comparison["decision_method"]))
+                if comparison["first_clearly_better"]:
+                    dominated_by.append(other)
+        keep = bool(eligible and not dominated_by)
+        if family == minimum_family:
+            keep = True
+        if keep:
+            plausible.append(family)
+        if not eligible:
+            family_reason = (
+                "Excluded because it is simpler than the minimum recommended family."
+            )
+        elif family == minimum_family:
+            family_reason = (
+                "Retained as the minimum recommended core family under the "
+                "conservative escalation rule."
+            )
+        elif dominated_by:
+            family_reason = (
+                "Excluded because it was clearly beaten on balanced accuracy by: "
+                + ", ".join(dominated_by)
+                + "."
+            )
+        else:
+            family_reason = (
+                "Retained because no eligible core family clearly beat it on "
+                "balanced accuracy."
+            )
+        assessments[family] = {
+            "available": availability[family],
+            "eligible_by_complexity": eligible,
+            "plausible": keep,
+            "reason": family_reason,
+            "dominated_by": dominated_by,
+            "clearly_worse_metrics": ["balanced_accuracy"] if dominated_by else [],
+        }
+
+    return {
+        "status": "available",
+        "scope": "core_probe_families",
+        "minimum_recommended_family": minimum_family,
+        "plausible_families": plausible,
+        "decision_method": _plausible_family_decision_method(methods),
+        "reason": None,
+        "assessments": assessments,
+    }
+
+
 def _recommended_family(
     families: dict[str, _FamilyEvidence],
     raw_best_family: _FamilyEvidence | None,
@@ -772,6 +929,13 @@ def _build_recommendation_evidence(
         if best_score is not None and dummy_score is not None
         else None
     )
+    plausible_family_set = _singlelabel_plausible_family_set(
+        families,
+        minimum_family=recommended_family,
+        signal_available=best_clearly_beats_dummy,
+        blocking=any(flag.get("severity") == "blocking" for flag in quality_flags),
+        paired_payload=paired_payload,
+    )
 
     return {
         "selection_rule": (
@@ -826,6 +990,7 @@ def _build_recommendation_evidence(
             "local_kernel_vs_smooth_nonlinear": smooth_vs_local,
             "raw_best_vs_recommended": raw_best_vs_recommended,
         },
+        "plausible_family_set": plausible_family_set,
         "geometry": _geometry_evidence(metrics),
         "quality_flags": quality_flags,
         "quality_score": _quality_score(quality_flags),
@@ -1344,6 +1509,170 @@ def _multilabel_comparison_counts(
     }
 
 
+def _multilabel_candidate_family(comparisons: dict[str, Any]) -> str | None:
+    """Select the minimum multilabel family using the recommendation rule."""
+    linear_entries = comparisons["linear_vs_best"].values()
+    linear_within = sum(
+        bool(item["linear_within_one_standard_error"]) for item in linear_entries
+    )
+    linear_worse = sum(bool(item["linear_clearly_worse"]) for item in linear_entries)
+    smooth_clear = len(comparisons["smooth_vs_linear"]["clear_metrics"])
+    local_clear = len(comparisons["local_kernel_vs_smooth"]["clear_metrics"])
+    if linear_within >= 2 and linear_worse == 0:
+        return "linear"
+    if smooth_clear >= 2 and local_clear < 2:
+        return "smooth_nonlinear"
+    if local_clear >= 2:
+        return "local_kernel"
+    return None
+
+
+def _multilabel_plausible_family_set(
+    family_metrics: dict[str, Any],
+    *,
+    minimum_family: str | None,
+    signal_available: bool,
+    blocking: bool,
+    paired_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the competitive frontier across multilabel primary metrics."""
+    availability = {
+        family: all(
+            family_metrics[family][metric]["available"]
+            for metric in _MULTILABEL_PRIMARY_METRICS
+        )
+        for family in _FAMILY_ORDER
+    }
+    if blocking:
+        return _inactive_plausible_family_set(
+            availability,
+            status="not_applicable",
+            reason="Blocking evidence prevents a model-family interpretation.",
+        )
+    if not signal_available:
+        return _inactive_plausible_family_set(
+            availability,
+            status="not_applicable",
+            reason="The predictive signal gate did not clear the dummy baseline.",
+        )
+
+    minimum_rank = (
+        _FAMILY_ORDER.index(minimum_family) if minimum_family is not None else 0
+    )
+    required = list(_FAMILY_ORDER[minimum_rank:])
+    missing = [family for family in required if not availability[family]]
+    if missing:
+        result = _inactive_plausible_family_set(
+            availability,
+            status="unavailable",
+            reason=(
+                "The competitive frontier could not be constructed because "
+                "required core-family metrics were unavailable: "
+                + ", ".join(missing)
+                + "."
+            ),
+        )
+        result["minimum_recommended_family"] = minimum_family
+        for family in _FAMILY_ORDER:
+            eligible = _FAMILY_ORDER.index(family) >= minimum_rank
+            result["assessments"][family]["eligible_by_complexity"] = eligible
+            if not eligible:
+                result["assessments"][family]["reason"] = (
+                    "Excluded because it is simpler than the minimum "
+                    "recommended family."
+                )
+        return result
+
+    methods: set[str] = set()
+    assessments: dict[str, Any] = {}
+    plausible: list[str] = []
+    eligible_families = [
+        family
+        for family in _FAMILY_ORDER
+        if _FAMILY_ORDER.index(family) >= minimum_rank
+    ]
+    for family in _FAMILY_ORDER:
+        eligible = family in eligible_families
+        dominated_by: list[str] = []
+        worse_metrics: list[str] = []
+        if eligible:
+            for other in eligible_families:
+                if other == family:
+                    continue
+                other_clear = []
+                for metric in _MULTILABEL_PRIMARY_METRICS:
+                    family_item = family_metrics[family][metric]
+                    other_item = family_metrics[other][metric]
+                    paired = _paired_metric_entry(
+                        other_item, family_item, metric, paired_payload
+                    )
+                    methods.add(
+                        "paired_oof_bootstrap"
+                        if paired is not None
+                        else "marginal_standard_error_fallback"
+                    )
+                    if _multilabel_clearly_better(
+                        other_item,
+                        family_item,
+                        metric=metric,
+                        paired_payload=paired_payload,
+                    ):
+                        other_clear.append(metric)
+                if len(other_clear) >= 2:
+                    dominated_by.append(other)
+                    worse_metrics.extend(other_clear)
+        keep = bool(eligible and not dominated_by)
+        if family == minimum_family:
+            keep = True
+        if keep:
+            plausible.append(family)
+        distinct_worse_metrics = [
+            metric for metric in _MULTILABEL_PRIMARY_METRICS if metric in worse_metrics
+        ]
+        if not eligible:
+            family_reason = (
+                "Excluded because it is simpler than the minimum recommended family."
+            )
+        elif family == minimum_family:
+            family_reason = (
+                "Retained as the minimum recommended core family under the "
+                "conservative multilabel escalation rule."
+            )
+        elif dominated_by:
+            family_reason = (
+                "Excluded because another eligible family clearly beat it on at "
+                "least two primary metrics: " + ", ".join(dominated_by) + "."
+            )
+        else:
+            family_reason = (
+                "Retained because no eligible family clearly beat it on at least "
+                "two primary metrics."
+            )
+        assessments[family] = {
+            "available": availability[family],
+            "eligible_by_complexity": eligible,
+            "plausible": keep,
+            "reason": family_reason,
+            "dominated_by": dominated_by,
+            "clearly_worse_metrics": distinct_worse_metrics,
+        }
+
+    return {
+        "status": "available",
+        "scope": "core_probe_families",
+        "minimum_recommended_family": minimum_family,
+        "plausible_families": plausible,
+        "decision_method": _plausible_family_decision_method(methods),
+        "reason": (
+            "Primary metrics did not resolve a minimum core family; the set lists "
+            "the nondominated families."
+            if minimum_family is None
+            else None
+        ),
+        "assessments": assessments,
+    }
+
+
 def _multilabel_quality_flags(
     metrics: dict[str, Any],
     family_metrics: dict[str, Any],
@@ -1533,6 +1862,19 @@ def compute_multilabel_scores(
     flags = _multilabel_quality_flags(
         metrics, family_metrics, skipped_count, warning_count
     )
+    signal_available = len(signal_metrics) >= 2
+    blocking = any(flag.get("severity") == "blocking" for flag in flags)
+    candidate_family = _multilabel_candidate_family(comparisons)
+    recommended_family = (
+        candidate_family if signal_available and not blocking else None
+    )
+    plausible_family_set = _multilabel_plausible_family_set(
+        family_metrics,
+        minimum_family=recommended_family,
+        signal_available=signal_available,
+        blocking=blocking,
+        paired_payload=paired_payload,
+    )
     topology = metrics.get("topology", {})
     topology_strength = _topology_score(metrics)
     evidence = {
@@ -1546,8 +1888,11 @@ def compute_multilabel_scores(
         "best_by_metric": best_by_metric,
         "signal_metrics_beating_dummy": signal_metrics,
         "signal_comparisons": signal_comparisons,
-        "best_clearly_beats_dummy_on_two_primary_metrics": len(signal_metrics) >= 2,
+        "best_clearly_beats_dummy_on_two_primary_metrics": signal_available,
         "family_comparisons": comparisons,
+        "candidate_family": candidate_family,
+        "recommended_family": recommended_family,
+        "plausible_family_set": plausible_family_set,
         "topology_available": bool(
             topology_strength is not None and topology.get("skipped_reason") is None
         ),
@@ -1607,16 +1952,7 @@ def make_multilabel_recommendation(
             "prevalence baseline on at least two primary multilabel metrics."
         )
     else:
-        comparisons = evidence["family_comparisons"]
-        linear_entries = comparisons["linear_vs_best"].values()
-        linear_within = sum(
-            bool(item["linear_within_one_standard_error"]) for item in linear_entries
-        )
-        linear_worse = sum(
-            bool(item["linear_clearly_worse"]) for item in linear_entries
-        )
-        smooth_clear = len(comparisons["smooth_vs_linear"]["clear_metrics"])
-        local_clear = len(comparisons["local_kernel_vs_smooth"]["clear_metrics"])
+        core_family = evidence["recommended_family"]
         graph = metrics.get("graph", {})
         multilabel_fragmentation_supported = bool(
             graph.get("graph_fragmentation_score") is not None
@@ -1624,19 +1960,19 @@ def make_multilabel_recommendation(
             and int(metrics.get("boundary", {}).get("boundary_sample_size", 0)) >= 10
         )
         topology_available = bool(evidence.get("topology_available"))
-        if linear_within >= 2 and linear_worse == 0:
+        if core_family == "linear":
             recommendation = LINEAR_LIKELY_SUFFICIENT
             decision_path.append(
                 "The linear family was within uncertainty of the best family on "
                 "at least two primary metrics and was not clearly worse on the third."
             )
-        elif smooth_clear >= 2 and local_clear < 2:
+        elif core_family == "smooth_nonlinear":
             recommendation = SMOOTH_NONLINEAR_RECOMMENDED
             decision_path.append(
                 "Smooth nonlinear probes clearly improved over linear on at "
                 "least two primary multilabel metrics."
             )
-        elif local_clear >= 2:
+        elif core_family == "local_kernel":
             if multilabel_fragmentation_supported:
                 recommendation = HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
                 decision_path.append(
@@ -1919,6 +2255,180 @@ def _regression_comparison_counts(
     }
 
 
+def _regression_candidate_family(comparisons: dict[str, Any]) -> str | None:
+    """Select the minimum regression family using the recommendation rule."""
+    linear_entries = comparisons["linear_vs_best"].values()
+    linear_within = sum(
+        bool(item["linear_within_one_standard_error"]) for item in linear_entries
+    )
+    linear_worse = sum(bool(item["linear_clearly_worse"]) for item in linear_entries)
+    smooth_clear = len(comparisons["smooth_vs_linear"]["clear_metrics"])
+    local_clear = len(comparisons["local_kernel_vs_smooth"]["clear_metrics"])
+    if linear_within >= 1 and linear_worse == 0:
+        return "linear"
+    if smooth_clear >= 1 and local_clear < 1:
+        return "smooth_nonlinear"
+    if local_clear >= 1:
+        return "local_kernel"
+    return None
+
+
+def _regression_plausible_family_set(
+    family_metrics: dict[str, Any],
+    *,
+    minimum_family: str | None,
+    signal_available: bool,
+    blocking: bool,
+    paired_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the Pareto frontier across the two primary regression metrics."""
+    availability = {
+        family: all(
+            family_metrics[family][metric]["available"]
+            for metric in _REGRESSION_PRIMARY_METRICS
+        )
+        for family in _FAMILY_ORDER
+    }
+    if blocking:
+        return _inactive_plausible_family_set(
+            availability,
+            status="not_applicable",
+            reason="Blocking evidence prevents a model-family interpretation.",
+        )
+    if not signal_available:
+        return _inactive_plausible_family_set(
+            availability,
+            status="not_applicable",
+            reason="The predictive signal gate did not clear the dummy baseline.",
+        )
+
+    minimum_rank = (
+        _FAMILY_ORDER.index(minimum_family) if minimum_family is not None else 0
+    )
+    required = list(_FAMILY_ORDER[minimum_rank:])
+    missing = [family for family in required if not availability[family]]
+    if missing:
+        result = _inactive_plausible_family_set(
+            availability,
+            status="unavailable",
+            reason=(
+                "The competitive frontier could not be constructed because "
+                "required core-family metrics were unavailable: "
+                + ", ".join(missing)
+                + "."
+            ),
+        )
+        result["minimum_recommended_family"] = minimum_family
+        for family in _FAMILY_ORDER:
+            eligible = _FAMILY_ORDER.index(family) >= minimum_rank
+            result["assessments"][family]["eligible_by_complexity"] = eligible
+            if not eligible:
+                result["assessments"][family]["reason"] = (
+                    "Excluded because it is simpler than the minimum "
+                    "recommended family."
+                )
+        return result
+
+    methods: set[str] = set()
+    assessments: dict[str, Any] = {}
+    plausible: list[str] = []
+    eligible_families = [
+        family
+        for family in _FAMILY_ORDER
+        if _FAMILY_ORDER.index(family) >= minimum_rank
+    ]
+    for family in _FAMILY_ORDER:
+        eligible = family in eligible_families
+        dominated_by: list[str] = []
+        worse_metrics: list[str] = []
+        if eligible:
+            for other in eligible_families:
+                if other == family:
+                    continue
+                other_clear = []
+                family_clear = []
+                for metric in _REGRESSION_PRIMARY_METRICS:
+                    family_item = family_metrics[family][metric]
+                    other_item = family_metrics[other][metric]
+                    paired = _paired_metric_entry(
+                        other_item, family_item, metric, paired_payload
+                    )
+                    methods.add(
+                        "paired_oof_bootstrap"
+                        if paired is not None
+                        else "marginal_standard_error_fallback"
+                    )
+                    if _regression_clearly_better(
+                        other_item,
+                        family_item,
+                        metric=metric,
+                        paired_payload=paired_payload,
+                    ):
+                        other_clear.append(metric)
+                    if _regression_clearly_better(
+                        family_item,
+                        other_item,
+                        metric=metric,
+                        paired_payload=paired_payload,
+                    ):
+                        family_clear.append(metric)
+                if other_clear and not family_clear:
+                    dominated_by.append(other)
+                    worse_metrics.extend(other_clear)
+        keep = bool(eligible and not dominated_by)
+        if family == minimum_family:
+            keep = True
+        if keep:
+            plausible.append(family)
+        distinct_worse_metrics = [
+            metric for metric in _REGRESSION_PRIMARY_METRICS if metric in worse_metrics
+        ]
+        if not eligible:
+            family_reason = (
+                "Excluded because it is simpler than the minimum recommended family."
+            )
+        elif family == minimum_family:
+            family_reason = (
+                "Retained as the minimum recommended core family under the "
+                "conservative regression escalation rule."
+            )
+        elif dominated_by:
+            family_reason = (
+                "Excluded because another eligible family was clearly better on "
+                "at least one primary R2 metric and not clearly worse on the other: "
+                + ", ".join(dominated_by)
+                + "."
+            )
+        else:
+            family_reason = (
+                "Retained because no eligible family Pareto-dominated it across "
+                "the primary R2 metrics."
+            )
+        assessments[family] = {
+            "available": availability[family],
+            "eligible_by_complexity": eligible,
+            "plausible": keep,
+            "reason": family_reason,
+            "dominated_by": dominated_by,
+            "clearly_worse_metrics": distinct_worse_metrics,
+        }
+
+    return {
+        "status": "available",
+        "scope": "core_probe_families",
+        "minimum_recommended_family": minimum_family,
+        "plausible_families": plausible,
+        "decision_method": _plausible_family_decision_method(methods),
+        "reason": (
+            "Primary metrics did not resolve a minimum core family; the set lists "
+            "the nondominated families."
+            if minimum_family is None
+            else None
+        ),
+        "assessments": assessments,
+    }
+
+
 def _regression_quality_flags(
     metrics: dict[str, Any],
     family_metrics: dict[str, Any],
@@ -2061,6 +2571,19 @@ def compute_regression_scores(
     flags = _regression_quality_flags(
         metrics, family_metrics, skipped_count, warning_count
     )
+    signal_available = len(signal_metrics) >= 1
+    blocking = any(flag.get("severity") == "blocking" for flag in flags)
+    candidate_family = _regression_candidate_family(comparisons)
+    recommended_family = (
+        candidate_family if signal_available and not blocking else None
+    )
+    plausible_family_set = _regression_plausible_family_set(
+        family_metrics,
+        minimum_family=recommended_family,
+        signal_available=signal_available,
+        blocking=blocking,
+        paired_payload=paired_payload,
+    )
     topology = metrics.get("topology", {})
     topology_strength = _topology_score(metrics)
     evidence = {
@@ -2075,8 +2598,11 @@ def compute_regression_scores(
         "best_by_metric": best_by_metric,
         "signal_metrics_beating_dummy": signal_metrics,
         "signal_comparisons": signal_comparisons,
-        "best_clearly_beats_dummy_on_primary_metrics": len(signal_metrics) >= 1,
+        "best_clearly_beats_dummy_on_primary_metrics": signal_available,
         "family_comparisons": comparisons,
+        "candidate_family": candidate_family,
+        "recommended_family": recommended_family,
+        "plausible_family_set": plausible_family_set,
         "topology_available": bool(
             topology_strength is not None and topology.get("skipped_reason") is None
         ),
@@ -2153,32 +2679,23 @@ def make_regression_recommendation(
             "dummy baseline on a primary regression metric."
         )
     else:
-        comparisons = evidence["family_comparisons"]
-        linear_entries = comparisons["linear_vs_best"].values()
-        linear_within = sum(
-            bool(item["linear_within_one_standard_error"]) for item in linear_entries
-        )
-        linear_worse = sum(
-            bool(item["linear_clearly_worse"]) for item in linear_entries
-        )
-        smooth_clear = len(comparisons["smooth_vs_linear"]["clear_metrics"])
-        local_clear = len(comparisons["local_kernel_vs_smooth"]["clear_metrics"])
+        core_family = evidence["recommended_family"]
         high_discontinuity = float(
             metrics.get("neighborhood", {}).get("high_discontinuity_fraction") or 0.0
         )
-        if linear_within >= 1 and linear_worse == 0:
+        if core_family == "linear":
             recommendation = LINEAR_RESPONSE_LIKELY_SUFFICIENT
             decision_path.append(
                 "The linear response family was within uncertainty of the best "
                 "observed family."
             )
-        elif smooth_clear >= 1 and local_clear < 1:
+        elif core_family == "smooth_nonlinear":
             recommendation = SMOOTH_NONLINEAR_RESPONSE_RECOMMENDED
             decision_path.append(
                 "Smooth nonlinear probes clearly improved over the linear "
                 "response family."
             )
-        elif local_clear >= 1:
+        elif core_family == "local_kernel":
             if high_discontinuity >= 0.35:
                 recommendation = HIGH_CAPACITY_OR_PARTITIONING_REGRESSION_RECOMMENDED
                 decision_path.append(

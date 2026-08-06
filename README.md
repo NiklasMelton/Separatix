@@ -231,7 +231,14 @@ The recommendation is produced by a fixed, inspectable pipeline:
 8. Treat fragmentation and optional topology as supporting structural evidence,
    not as shortcuts around weak probe evidence.
 9. Render both a plain-language summary and a structured report, including
-   `raw_best_family` and `recommended_family` when a report is requested.
+   `raw_best_family`, `recommended_family`, and an uncertainty-aware plausible
+   core-family set when a report is requested.
+
+The plausible set is a heuristic competitive frontier over the tested
+`linear`, `smooth_nonlinear`, and `local_kernel` probes. It is not a formal
+confidence set and does not claim that retained families perform equally well.
+Optional MLP and high-capacity structural upgrades remain separate from this
+core-family comparison.
 
 The full rationale and decision rules are documented in
 [the decision pipeline reference](docs/decision_pipeline.md).

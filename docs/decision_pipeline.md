@@ -464,6 +464,29 @@ Reasoning:
 - in the multilabel path, the local/kernel family must clearly beat the smooth
   family on at least two primary metrics
 
+#### Plausible Core-Family Set
+
+Alongside the single recommendation, the report returns a competitive frontier
+over `linear`, `smooth_nonlinear`, and `local_kernel`. Families simpler than the
+minimum recommended family are excluded. Among the remaining families:
+
+- single-label classification excludes a family when another eligible family
+  clearly beats it on balanced accuracy
+- multilabel classification excludes a family when another eligible family
+  clearly beats it on at least two of the three primary metrics
+- regression excludes a family when another eligible family is clearly better
+  on at least one primary R2 metric and is not clearly worse on the other
+
+When multilabel or regression metrics have strong signal but do not resolve a
+minimum family, the rank floor is omitted and the nondominated core families
+are reported. The minimum family is always retained when it is resolved.
+Paired out-of-fold bootstrap comparisons are used when available, with the
+existing marginal-standard-error fallback recorded explicitly otherwise.
+
+The result is heuristic and confidence-aware, but it is not a formal confidence
+set or an equivalence claim. It does not include optional MLP probes or the
+high-capacity/partitioning structural upgrade.
+
 ### 4. High-Capacity Or Partitioning Upgrade
 
 If the local/kernel family clearly wins and the boundary evidence also suggests

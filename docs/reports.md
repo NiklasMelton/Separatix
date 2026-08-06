@@ -29,6 +29,30 @@ evidence. Depending on the target path, inspect `recommendation_evidence`,
 These objects distinguish the numerically strongest `raw_best_family` from the
 conservatively selected `recommended_family`.
 
+Each target-specific evidence object also contains `plausible_family_set`. Its
+main fields are:
+
+- `status`: `available`, `not_applicable`, or `unavailable`
+- `minimum_recommended_family`: the simplest family supported by the ordinary
+  conservative recommendation rule, or `null` when primary metrics disagree
+- `plausible_families`: the ordered, uncertainty-aware competitive frontier
+- `decision_method`: paired bootstrap, marginal-standard-error fallback, or
+  `mixed`
+- `assessments`: per-family availability, complexity eligibility, dominance,
+  and inclusion reasons
+
+The scope is deliberately limited to the core `linear`, `smooth_nonlinear`, and
+`local_kernel` probes. An MLP override or a high-capacity/partitioning upgrade
+does not enter this set. A `not_applicable` result means the signal gate failed
+or blocking evidence prevents a family interpretation. `unavailable` means a
+required core probe or primary metric was missing, so the frontier could not be
+completed.
+
+This plausible set is a heuristic diagnostic frontier, not a formal confidence
+set, equivalence test, or assertion that all retained families have equal
+performance. It answers the narrower question: which tested core families have
+not been clearly ruled out under the target-specific comparison policy?
+
 `probe_evaluation` describes the shared evaluation cohort and materialized fold
 plan. `paired_probe_comparisons` contains probe-level paired bootstrap deltas;
 the target-specific recommendation evidence identifies whether each decision
