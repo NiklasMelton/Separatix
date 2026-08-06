@@ -37,7 +37,8 @@ def test_recommendation_engine_linear_branch() -> None:
     recommendation, confidence, path, _ = make_recommendation(scores, metrics)
     assert recommendation == "linear_likely_sufficient"
     assert confidence in {"medium", "high"}
-    assert path
+    assert "linear probe" in path[0].lower()
+    assert any("marginal uncertainty" in step for step in path)
 
 
 def test_recommendation_engine_smooth_nonlinear_branch() -> None:
@@ -262,7 +263,8 @@ def test_multilabel_recommendation_engine_uses_fragmentation_for_high_capacity()
     recommendation, _, path, _ = make_multilabel_recommendation(scores, metrics)
 
     assert recommendation == HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
-    assert any("fragmented graph" in step for step in path)
+    assert "fragmented graph" in path[0]
+    assert any("marginal uncertainty" in step for step in path)
 
 
 def test_multilabel_topology_does_not_replace_fragmentation_gate() -> None:

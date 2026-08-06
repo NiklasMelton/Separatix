@@ -104,6 +104,12 @@ training fold. Sparse probes use non-centering scaling. Geometry and topology
 continue to describe the supplied, unscaled coordinate space, and the report
 records both choices under `preprocessing`.
 
+Ordinary probe families are evaluated on one shared row cohort and one shared
+held-out split plan. Family and dummy comparisons use paired bootstrap intervals
+over their aligned out-of-fold predictions. These intervals capture covariance
+between probe errors, but remain diagnostic resampling evidence rather than
+independent-test confidence intervals.
+
 Optional feed-forward MLP probes can be installed and enabled explicitly:
 
 ```bash

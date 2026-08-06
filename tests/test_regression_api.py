@@ -75,6 +75,8 @@ def test_single_target_regression_returns_report_and_json() -> None:
     assert report.class_summary["target_type"] == "regression"
     assert "regression_recommendation_evidence" in report.metrics
     assert "explicit regression diagnostic" in report.recommendation_text
+    assert "paired bootstrap intervals" not in report.decision_path[0]
+    assert any("paired bootstrap intervals" in step for step in report.decision_path)
     assert json.loads(report.to_json())["class_summary"]["target_type"] == "regression"
 
 

@@ -30,6 +30,13 @@ what happens when such a diagnostic is reached:
   event, and warns when configured to do so.
 - `"skip"` omits the dense-only diagnostic and records why.
 
+Ordinary probe families must be compared on matching evidence. If
+`"warn_and_sample"` selects a smaller dense-compatible cohort, all active
+ordinary probes use those same rows and folds, although sparse-compatible
+estimators continue to consume a sparse view. Under `"skip"`, dense-only probes
+are omitted and the remaining sparse-compatible probes stay aligned on the
+full capped cohort.
+
 `max_dense_mb` is a hard dense-memory estimate, and `max_samples` is a hard row
 cap. Group-aware sampling never splits a group or exceeds the row cap. If no
 support-preserving sample fits, the supervised diagnostic is skipped rather

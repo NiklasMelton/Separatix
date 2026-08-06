@@ -643,9 +643,7 @@ def _fit_mlp_surface_examples(
             for label, item in evidence_by_label.items()
             if label != spec.label and "balanced_accuracy" in item
         ]
-        architecture_margin = float(evidence["balanced_accuracy"]) - max(
-            other_scores
-        )
+        architecture_margin = float(evidence["balanced_accuracy"]) - max(other_scores)
         if architecture_margin < spec.min_architecture_margin:
             raise RuntimeError(
                 f"The {spec.label} calibration margin fell to "
@@ -733,8 +731,7 @@ def _draw_mlp_surface(
     )
     title = example.spec.label.replace("_", " ").capitalize()
     ax.set_title(
-        f"{title}\nmlp_{example.spec.label} · held-out BA "
-        f"{example.held_out_score:.2f}",
+        f"{title}\nmlp_{example.spec.label} · held-out BA {example.held_out_score:.2f}",
         loc="left",
         fontsize=12,
         fontweight="bold",

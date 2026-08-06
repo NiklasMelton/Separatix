@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from math import floor
 from typing import Any, cast
 
@@ -24,6 +25,7 @@ from separatix.densify import (
     ensure_dense_or_sample_multilabel,
     ensure_dense_or_sample_regression,
 )
+from separatix.models.comparison import build_paired_probe_comparisons
 from separatix.models.scoring import (
     MultilabelPriorDummy,
     TargetMeanDummyRegressor,
@@ -32,6 +34,7 @@ from separatix.models.scoring import (
     evaluate_estimator,
     evaluate_multilabel_estimator,
     evaluate_regression_estimator,
+    materialize_evaluation_plan,
     summarize_multilabel_predictions,
     summarize_multilabel_stability,
     summarize_predictions,
@@ -60,6 +63,101 @@ _SMOOTH_PROBE_VARIANTS = (
 _SMOOTH_PROBE_SKIP_REASON = (
     "quadratic expansion and low-rank sketch exceed configured memory budget"
 )
+
+
+@dataclass
+class ProbeRunResult:
+    """Internal result containing aligned probe and comparison evidence."""
+
+    probes: dict[str, dict[str, Any]]
+    evaluation: dict[str, Any]
+    paired_comparisons: dict[str, Any]
+
+
+def _slice_rows(X: Any, indices: np.ndarray) -> Any:
+    """Slice dense or sparse feature rows."""
+    return X[indices, :] if sparse.issparse(X) else X[indices]
+
+
+def _compose_sample_info(
+    sample_info: dict[str, Any], relative_indices: np.ndarray
+) -> dict[str, Any]:
+    """Compose a nested cohort selection back to original input row indices."""
+    relative_indices = np.asarray(relative_indices, dtype=int)
+    original_indices = np.asarray(sample_info.get("indices", []), dtype=int)
+    if original_indices.size == 0:
+        composed = relative_indices
+    else:
+        composed = original_indices[relative_indices]
+    changed = relative_indices.size != original_indices.size or not np.array_equal(
+        relative_indices, np.arange(original_indices.size, dtype=int)
+    )
+    return {
+        **sample_info,
+        "sampled": bool(sample_info.get("sampled")) or changed,
+        "n_used": int(composed.size),
+        "indices": composed.tolist(),
+        "dense_alignment_sampling": changed,
+    }
+
+
+def _record_dense_probe_skips(
+    report_context: dict[str, Any],
+    *,
+    skip_start: int,
+    consumers: tuple[str, ...],
+    reason: str,
+) -> None:
+    """Replace one alignment skip with consumer-specific diagnostic skips."""
+    skipped = report_context.setdefault("skipped_diagnostics", [])
+    del skipped[skip_start:]
+    skipped.extend({"name": name, "reason": reason} for name in consumers)
+
+
+def _attach_plan_id(result: dict[str, Any], evaluation_plan_id: str) -> dict[str, Any]:
+    """Attach the shared plan identifier to one probe result."""
+    result["evaluation_plan_id"] = evaluation_plan_id
+    return result
+
+
+def _unavailable_comparisons(reason: str) -> dict[str, Any]:
+    """Return a consistent unavailable paired-comparison payload."""
+    return {
+        "status": "unavailable",
+        "method": "paired_oof_bootstrap",
+        "reason": reason,
+        "resamples_requested": 0,
+        "resamples_used": 0,
+        "resample_plan_id": None,
+        "comparisons": {},
+    }
+
+
+def _unavailable_run(
+    probes: dict[str, dict[str, Any]],
+    sample_info: dict[str, Any],
+    *,
+    reason: str,
+    method: str,
+) -> ProbeRunResult:
+    """Return a probe run whose aligned held-out evaluation was unavailable."""
+    evaluation = {
+        "alignment_status": "unavailable",
+        "evaluation_plan_id": None,
+        "cv_method": method,
+        "n_samples": int(sample_info.get("n_used", 0)),
+        "n_splits": 0,
+        "group_aware": bool(sample_info.get("group_sampling")),
+        "train_sizes": [],
+        "test_sizes": [],
+        "fold_assignments": None,
+        "row_indices": sample_info.get("indices", []),
+    }
+    return ProbeRunResult(
+        probes=probes,
+        evaluation=evaluation,
+        paired_comparisons=_unavailable_comparisons(reason),
+    )
 
 
 def _feature_scaler(X: Any) -> StandardScaler:
@@ -303,7 +401,7 @@ def run_model_probes(
     report_context: dict[str, Any],
     class_labels: np.ndarray | None = None,
     groups: np.ndarray | None = None,
-) -> dict[str, dict[str, object]]:
+) -> ProbeRunResult:
     """Run lightweight baseline and probe classifiers."""
     budget = cast(BudgetConfig, BUDGETS[config.budget])
     X_used, y_used, sample_info = cap_samples_for_budget(
@@ -319,7 +417,7 @@ def run_model_probes(
         report_context.setdefault("skipped_diagnostics", []).append(
             {"name": "model_probes", "reason": reason, "severity": "blocking"}
         )
-        return {
+        unavailable_probes = {
             name: {
                 "skipped_reason": reason,
                 "model_name": model_name,
@@ -334,6 +432,44 @@ def run_model_probes(
                 "kernel_approx": "RBFSampler+SGDClassifier",
             }.items()
         }
+        return _unavailable_run(
+            unavailable_probes,
+            sample_info,
+            reason=reason,
+            method="insufficient_support",
+        )
+
+    dense_consumers = ("smooth_nonlinear_probe",) + (
+        ("kernel_approximation_probe",) if budget["run_kernel_probe"] else ()
+    )
+    skip_start = len(report_context.setdefault("skipped_diagnostics", []))
+    dense_info = ensure_dense_or_sample(
+        X_used,
+        y_used,
+        reason="probe_family_alignment",
+        config=config,
+        report_context=report_context,
+        groups=groups_used,
+    )
+    dense_X: np.ndarray | None
+    dense_unavailable_reason: str | None = None
+    if dense_info["skipped"]:
+        dense_X = None
+        dense_unavailable_reason = "dense conversion unavailable under current policy"
+        _record_dense_probe_skips(
+            report_context,
+            skip_start=skip_start,
+            consumers=dense_consumers,
+            reason=dense_unavailable_reason,
+        )
+    else:
+        relative_indices = np.asarray(dense_info["indices"], dtype=int)
+        X_used = _slice_rows(X_used, relative_indices)
+        y_used = np.asarray(dense_info["y"])
+        groups_used = dense_info.get("groups")
+        dense_X = np.asarray(dense_info["X"])
+        sample_info = _compose_sample_info(sample_info, relative_indices)
+
     cv, cv_method = choose_cv(
         y_used,
         budget["cv_folds"],
@@ -358,7 +494,7 @@ def run_model_probes(
         evaluation_mode = (
             "group_split_unavailable" if groups is not None else "insufficient_support"
         )
-        return {
+        unavailable_probes = {
             name: {
                 "skipped_reason": reason,
                 "model_name": estimator.__class__.__name__,
@@ -392,6 +528,22 @@ def run_model_probes(
                 "cv_stratification_method": cv_method,
             },
         }
+        return _unavailable_run(
+            unavailable_probes,
+            sample_info,
+            reason=reason,
+            method=cv_method,
+        )
+    cv, evaluation = materialize_evaluation_plan(
+        cv,
+        X_used,
+        y_used,
+        method=cv_method,
+        row_indices=np.asarray(sample_info["indices"], dtype=int),
+        groups=groups_used,
+    )
+    evaluation["row_indices"] = sample_info["indices"]
+    evaluation_plan_id = str(evaluation["evaluation_plan_id"])
     probes: dict[str, Any] = {
         "dummy": DummyClassifier(strategy="prior"),
         "linear": _linear_classifier(X_used),
@@ -434,42 +586,30 @@ def run_model_probes(
                 "sample_info": sample_info,
                 "evaluation_mode": evaluation_mode,
                 "cv_stratification_method": cv_method,
+                "evaluation_plan_id": evaluation_plan_id,
                 **_prediction_evidence(preds, config),
                 "evaluation_support": _classification_evaluation_support(y_used, cv),
             }
         )
         results[name] = metrics
 
-    smooth_info = ensure_dense_or_sample(
-        X_used,
-        y_used,
-        reason="smooth_nonlinear_probe",
-        config=config,
-        report_context=report_context,
-        groups=groups_used,
-    )
-    if smooth_info["skipped"]:
+    if dense_X is None:
         results["smooth_poly"] = {
-            "skipped_reason": "dense conversion unavailable under current policy",
+            "skipped_reason": dense_unavailable_reason,
             "model_name": "PolynomialFeatures+LogisticRegression",
             "sample_info": sample_info,
+            "evaluation_plan_id": evaluation_plan_id,
         }
     else:
-        dense_X = np.asarray(smooth_info["X"])
-        dense_y = np.asarray(smooth_info["y"])
-        dense_groups = smooth_info.get("groups")
+        dense_y = y_used
+        dense_groups = groups_used
         dtype = dense_X.dtype if dense_X.dtype is not None else np.dtype(float)
         expanded_features = _quadratic_feature_count(dense_X.shape[1])
         estimated_expanded_mb = _estimate_dense_mb(
             dense_X.shape[0], expanded_features, dtype
         )
         metadata = _smooth_probe_metadata(dense_X, sample_info)
-        cv_smooth, cv_smooth_method = choose_cv(
-            dense_y,
-            budget["cv_folds"],
-            groups=dense_groups,
-            random_state=config.random_state,
-        )
+        cv_smooth, cv_smooth_method = cv, cv_method
         if (
             expanded_features <= _MAX_FULL_QUADRATIC_FEATURES
             and estimated_expanded_mb <= config.max_dense_mb
@@ -502,6 +642,7 @@ def run_model_probes(
                     "runtime_seconds": float(time.perf_counter() - start),
                     "evaluation_mode": evaluation_mode,
                     "cv_stratification_method": cv_smooth_method,
+                    "evaluation_plan_id": evaluation_plan_id,
                     **_prediction_evidence(preds, config),
                     "evaluation_support": _classification_evaluation_support(
                         dense_y, cv_smooth
@@ -527,6 +668,7 @@ def run_model_probes(
                     **metadata,
                     "skipped_reason": _SMOOTH_PROBE_SKIP_REASON,
                     "model_name": "PolynomialCountSketch+LogisticRegression",
+                    "evaluation_plan_id": evaluation_plan_id,
                 }
             else:
                 estimator = _low_rank_quadratic_classifier(
@@ -565,6 +707,7 @@ def run_model_probes(
                         "runtime_seconds": float(time.perf_counter() - start),
                         "evaluation_mode": evaluation_mode,
                         "cv_stratification_method": cv_smooth_method,
+                        "evaluation_plan_id": evaluation_plan_id,
                         **_prediction_evidence(preds, config),
                         "evaluation_support": _classification_evaluation_support(
                             dense_y, cv_smooth
@@ -574,19 +717,12 @@ def run_model_probes(
                 results["smooth_poly"] = metrics
 
     if budget["run_kernel_probe"]:
-        dense_info = ensure_dense_or_sample(
-            X_used,
-            y_used,
-            reason="kernel_approximation_probe",
-            config=config,
-            report_context=report_context,
-            groups=groups_used,
-        )
-        if dense_info["skipped"]:
+        if dense_X is None:
             results["kernel_approx"] = {
-                "skipped_reason": "dense conversion unavailable under current policy",
+                "skipped_reason": dense_unavailable_reason,
                 "model_name": "RBFSampler+SGDClassifier",
                 "sample_info": sample_info,
+                "evaluation_plan_id": evaluation_plan_id,
             }
         else:
             estimator = Pipeline(
@@ -595,10 +731,8 @@ def run_model_probes(
                     (
                         "rff",
                         RBFSampler(
-                            gamma=1.0 / max(1, dense_info["X"].shape[1]),
-                            n_components=min(
-                                256, max(32, dense_info["X"].shape[1] * 2)
-                            ),
+                            gamma=1.0 / max(1, dense_X.shape[1]),
+                            n_components=min(256, max(32, dense_X.shape[1] * 2)),
                             random_state=config.random_state,
                         ),
                     ),
@@ -618,27 +752,20 @@ def run_model_probes(
             start = time.perf_counter()
             preds, evaluation_mode = evaluate_estimator(
                 estimator,
-                dense_info["X"],
-                dense_info["y"],
-                cv=choose_cv(
-                    dense_info["y"],
-                    budget["cv_folds"],
-                    groups=dense_info.get("groups"),
-                    random_state=config.random_state,
-                )[0],
-                groups=dense_info.get("groups"),
+                dense_X,
+                y_used,
+                cv=cv,
+                groups=groups_used,
             )
-            metrics = summarize_predictions(
-                dense_info["y"], preds, class_labels=class_labels
-            )
+            metrics = summarize_predictions(y_used, preds, class_labels=class_labels)
             metrics.update(
                 summarize_stability(
                     estimator,
-                    dense_info["X"],
-                    dense_info["y"],
+                    dense_X,
+                    y_used,
                     repeats=budget["bootstrap_repeats"],
                     random_state=config.random_state,
-                    groups=dense_info.get("groups"),
+                    groups=groups_used,
                 )
             )
             metrics.update(
@@ -647,21 +774,12 @@ def run_model_probes(
                     "runtime_seconds": float(time.perf_counter() - start),
                     "sample_info": sample_info,
                     "evaluation_mode": evaluation_mode,
-                    "cv_stratification_method": choose_cv(
-                        dense_info["y"],
-                        budget["cv_folds"],
-                        groups=dense_info.get("groups"),
-                        random_state=config.random_state,
-                    )[1],
+                    "cv_stratification_method": cv_method,
+                    "evaluation_plan_id": evaluation_plan_id,
                     **_prediction_evidence(preds, config),
                     "evaluation_support": _classification_evaluation_support(
-                        np.asarray(dense_info["y"]),
-                        choose_cv(
-                            dense_info["y"],
-                            budget["cv_folds"],
-                            groups=dense_info.get("groups"),
-                            random_state=config.random_state,
-                        )[0],
+                        y_used,
+                        cv,
                     ),
                 }
             )
@@ -671,8 +789,19 @@ def run_model_probes(
             "skipped_reason": "kernel probe disabled for this budget",
             "model_name": "RBFSampler+SGDClassifier",
             "sample_info": sample_info,
+            "evaluation_plan_id": evaluation_plan_id,
         }
-    return results
+    paired = build_paired_probe_comparisons(
+        results,
+        y_used,
+        target_mode="singlelabel",
+        requested_resamples=budget["pairwise_resamples"],
+        random_state=config.random_state,
+        evaluation_plan_id=evaluation_plan_id,
+        evaluation_available=evaluation.get("alignment_status") == "aligned",
+        groups=groups_used,
+    )
+    return ProbeRunResult(results, evaluation, paired)
 
 
 def _regression_smooth_estimator(
@@ -723,15 +852,12 @@ def _record_regression_probe(
     sample_info: dict[str, Any],
     target_names: np.ndarray,
     groups: np.ndarray | None,
+    cv: Any | None,
+    cv_method: str,
+    evaluation_plan_id: str,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     """Evaluate and summarize one regression probe."""
-    cv, cv_method = choose_regression_cv(
-        Y,
-        budget["cv_folds"],
-        groups=groups,
-        random_state=config.random_state,
-    )
     if cv is None and groups is not None:
         return {
             "skipped_reason": "group-disjoint supervised split unavailable",
@@ -740,6 +866,7 @@ def _record_regression_probe(
             "sample_info": sample_info,
             "evaluation_mode": "group_split_unavailable",
             "cv_method": cv_method,
+            "evaluation_plan_id": evaluation_plan_id,
         }
     start = time.perf_counter()
     preds, evaluation_mode = evaluate_regression_estimator(
@@ -769,6 +896,7 @@ def _record_regression_probe(
             "sample_info": sample_info,
             "evaluation_mode": evaluation_mode,
             "cv_method": cv_method,
+            "evaluation_plan_id": evaluation_plan_id,
             **_prediction_evidence(preds, config),
             "evaluation_support": _regression_evaluation_support(Y, cv),
         }
@@ -786,7 +914,7 @@ def run_regression_model_probes(
     report_context: dict[str, Any],
     target_names: np.ndarray,
     groups: np.ndarray | None = None,
-) -> dict[str, dict[str, object]]:
+) -> ProbeRunResult:
     """Run lightweight baseline and probe regressors."""
     budget = cast(BudgetConfig, BUDGETS[config.budget])
     X_used, Y_used, sample_info = cap_regression_samples_for_budget(
@@ -806,7 +934,7 @@ def run_regression_model_probes(
                 "severity": "blocking",
             }
         )
-        return {
+        unavailable_probes = {
             name: {
                 "skipped_reason": reason,
                 "model_name": model_name,
@@ -821,6 +949,60 @@ def run_regression_model_probes(
                 "kernel_approx": "RBFSampler+Ridge",
             }.items()
         }
+        return _unavailable_run(
+            unavailable_probes,
+            sample_info,
+            reason=reason,
+            method="insufficient_support",
+        )
+    dense_consumers = ("regression_smooth_nonlinear_probe",) + (
+        ("regression_kernel_approximation_probe",) if budget["run_kernel_probe"] else ()
+    )
+    skip_start = len(report_context.setdefault("skipped_diagnostics", []))
+    dense_info = ensure_dense_or_sample_regression(
+        X_used,
+        Y_used,
+        reason="regression_probe_family_alignment",
+        config=config,
+        report_context=report_context,
+        groups=groups_used,
+    )
+    dense_X: np.ndarray | None
+    dense_unavailable_reason: str | None = None
+    if dense_info["skipped"]:
+        dense_X = None
+        dense_unavailable_reason = "dense conversion unavailable under current policy"
+        _record_dense_probe_skips(
+            report_context,
+            skip_start=skip_start,
+            consumers=dense_consumers,
+            reason=dense_unavailable_reason,
+        )
+    else:
+        relative_indices = np.asarray(dense_info["indices"], dtype=int)
+        X_used = _slice_rows(X_used, relative_indices)
+        Y_used = np.asarray(dense_info["y"], dtype=float)
+        groups_used = dense_info.get("groups")
+        dense_X = np.asarray(dense_info["X"])
+        sample_info = _compose_sample_info(sample_info, relative_indices)
+
+    cv, cv_method = choose_regression_cv(
+        Y_used,
+        budget["cv_folds"],
+        groups=groups_used,
+        random_state=config.random_state,
+    )
+    cv, evaluation = materialize_evaluation_plan(
+        cv,
+        X_used,
+        Y_used,
+        method=cv_method,
+        row_indices=np.asarray(sample_info["indices"], dtype=int),
+        groups=groups_used,
+    )
+    evaluation["row_indices"] = sample_info["indices"]
+    evaluation_plan_id = str(evaluation["evaluation_plan_id"])
+
     n_neighbors = min(
         max(1, Y_used.shape[0] - 1),
         min(15, max(3, int(np.sqrt(Y_used.shape[0])))),
@@ -851,26 +1033,21 @@ def run_regression_model_probes(
             sample_info=sample_info,
             target_names=target_names,
             groups=groups_used,
+            cv=cv,
+            cv_method=cv_method,
+            evaluation_plan_id=evaluation_plan_id,
         )
 
-    smooth_info = ensure_dense_or_sample_regression(
-        X_used,
-        Y_used,
-        reason="regression_smooth_nonlinear_probe",
-        config=config,
-        report_context=report_context,
-        groups=groups_used,
-    )
-    if smooth_info["skipped"]:
+    if dense_X is None:
         results["smooth_poly"] = {
-            "skipped_reason": "dense conversion unavailable under current policy",
+            "skipped_reason": dense_unavailable_reason,
             "model_name": "PolynomialFeatures+Ridge",
             "sample_info": sample_info,
+            "evaluation_plan_id": evaluation_plan_id,
         }
     else:
-        dense_X = np.asarray(smooth_info["X"])
-        dense_Y = np.asarray(smooth_info["y"], dtype=float)
-        dense_groups = smooth_info.get("groups")
+        dense_Y = Y_used
+        dense_groups = groups_used
         dtype = dense_X.dtype if dense_X.dtype is not None else np.dtype(float)
         expanded_features = _quadratic_feature_count(dense_X.shape[1])
         estimated_expanded_mb = _estimate_dense_mb(
@@ -893,6 +1070,9 @@ def run_regression_model_probes(
                 sample_info=sample_info,
                 target_names=target_names,
                 groups=dense_groups,
+                cv=cv,
+                cv_method=cv_method,
+                evaluation_plan_id=evaluation_plan_id,
                 extra={**metadata, "probe_variant": _FULL_QUADRATIC_VARIANT},
             )
         else:
@@ -913,6 +1093,7 @@ def run_regression_model_probes(
                     **metadata,
                     "skipped_reason": _SMOOTH_PROBE_SKIP_REASON,
                     "model_name": "PolynomialCountSketch+Ridge",
+                    "evaluation_plan_id": evaluation_plan_id,
                 }
             else:
                 estimator = _regression_smooth_estimator(
@@ -929,6 +1110,9 @@ def run_regression_model_probes(
                     sample_info=sample_info,
                     target_names=target_names,
                     groups=dense_groups,
+                    cv=cv,
+                    cv_method=cv_method,
+                    evaluation_plan_id=evaluation_plan_id,
                     extra={
                         **metadata,
                         "probe_variant": _LOW_RANK_QUADRATIC_VARIANT,
@@ -940,19 +1124,12 @@ def run_regression_model_probes(
                 )
 
     if budget["run_kernel_probe"]:
-        dense_info = ensure_dense_or_sample_regression(
-            X_used,
-            Y_used,
-            reason="regression_kernel_approximation_probe",
-            config=config,
-            report_context=report_context,
-            groups=groups_used,
-        )
-        if dense_info["skipped"]:
+        if dense_X is None:
             results["kernel_approx"] = {
-                "skipped_reason": "dense conversion unavailable under current policy",
+                "skipped_reason": dense_unavailable_reason,
                 "model_name": "RBFSampler+Ridge",
                 "sample_info": sample_info,
+                "evaluation_plan_id": evaluation_plan_id,
             }
         else:
             estimator = Pipeline(
@@ -961,10 +1138,8 @@ def run_regression_model_probes(
                     (
                         "rff",
                         RBFSampler(
-                            gamma=1.0 / max(1, dense_info["X"].shape[1]),
-                            n_components=min(
-                                256, max(32, dense_info["X"].shape[1] * 2)
-                            ),
+                            gamma=1.0 / max(1, dense_X.shape[1]),
+                            n_components=min(256, max(32, dense_X.shape[1] * 2)),
                             random_state=config.random_state,
                         ),
                     ),
@@ -974,23 +1149,38 @@ def run_regression_model_probes(
             )
             results["kernel_approx"] = _record_regression_probe(
                 estimator,
-                np.asarray(dense_info["X"]),
-                np.asarray(dense_info["y"], dtype=float),
+                dense_X,
+                Y_used,
                 name="kernel_approx",
                 model_name="RBFSampler+Ridge",
                 config=config,
                 budget=budget,
                 sample_info=sample_info,
                 target_names=target_names,
-                groups=dense_info.get("groups"),
+                groups=groups_used,
+                cv=cv,
+                cv_method=cv_method,
+                evaluation_plan_id=evaluation_plan_id,
             )
     else:
         results["kernel_approx"] = {
             "skipped_reason": "kernel probe disabled for this budget",
             "model_name": "RBFSampler+Ridge",
             "sample_info": sample_info,
+            "evaluation_plan_id": evaluation_plan_id,
         }
-    return results
+    paired = build_paired_probe_comparisons(
+        results,
+        Y_used,
+        target_mode="regression",
+        requested_resamples=budget["pairwise_resamples"],
+        random_state=config.random_state,
+        evaluation_plan_id=evaluation_plan_id,
+        evaluation_available=evaluation.get("alignment_status") == "aligned",
+        groups=groups_used,
+        names=target_names,
+    )
+    return ProbeRunResult(results, evaluation, paired)
 
 
 def _ensure_dense_X_for_multilabel(
@@ -1024,15 +1214,12 @@ def _evaluate_multilabel_probe(
     label_names: np.ndarray,
     sample_info: dict[str, Any],
     groups: np.ndarray | None = None,
+    cv: Any | None,
+    cv_method: str,
+    evaluation_plan_id: str,
 ) -> dict[str, Any]:
     """Evaluate one multilabel probe and return report metrics."""
     start = time.perf_counter()
-    cv, cv_method = choose_multilabel_cv(
-        Y,
-        max_folds=budget["cv_folds"],
-        config=config,
-        groups=groups,
-    )
     if cv is None:
         unavailable = (
             "group-disjoint supervised split unavailable"
@@ -1045,6 +1232,7 @@ def _evaluate_multilabel_probe(
             "sample_info": sample_info,
             "evaluation_mode": cv_method,
             "cv_stratification_method": cv_method,
+            "evaluation_plan_id": evaluation_plan_id,
         }
     preds, evaluation_mode = evaluate_multilabel_estimator(
         estimator,
@@ -1073,6 +1261,7 @@ def _evaluate_multilabel_probe(
             "sample_info": sample_info,
             "evaluation_mode": evaluation_mode,
             "cv_stratification_method": cv_method,
+            "evaluation_plan_id": evaluation_plan_id,
             **_prediction_evidence(preds, config),
             "evaluation_support": _multilabel_evaluation_support(Y, cv),
         }
@@ -1088,7 +1277,7 @@ def run_multilabel_model_probes(
     report_context: dict[str, Any],
     label_names: np.ndarray,
     groups: np.ndarray | None = None,
-) -> dict[str, dict[str, Any]]:
+) -> ProbeRunResult:
     """Run lightweight multilabel baseline and probe classifiers."""
     budget = cast(BudgetConfig, BUDGETS[config.budget])
     X_used, Y_used, sample_info = cap_multilabel_samples_for_budget(
@@ -1112,7 +1301,7 @@ def run_multilabel_model_probes(
                 "severity": "blocking",
             }
         )
-        return {
+        unavailable_probes = {
             name: {
                 "skipped_reason": reason,
                 "model_name": model_name,
@@ -1127,6 +1316,12 @@ def run_multilabel_model_probes(
                 "kernel_approx": "RBFSampler+OneVsRestSGDClassifier",
             }.items()
         }
+        return _unavailable_run(
+            unavailable_probes,
+            sample_info,
+            reason=reason,
+            method="insufficient_support",
+        )
     target_info = ensure_dense_multilabel_target(
         X_used,
         Y_used,
@@ -1137,7 +1332,7 @@ def run_multilabel_model_probes(
     )
     if target_info["skipped"]:
         reason = "multilabel target exceeds configured dense-memory budget"
-        return {
+        unavailable_probes = {
             name: {
                 "skipped_reason": reason,
                 "model_name": model_name,
@@ -1152,6 +1347,12 @@ def run_multilabel_model_probes(
                 "kernel_approx": "RBFSampler+OneVsRestSGDClassifier",
             }.items()
         }
+        return _unavailable_run(
+            unavailable_probes,
+            sample_info,
+            reason=reason,
+            method="memory_budget_unavailable",
+        )
     relative_indices = np.asarray(target_info["indices"], dtype=int)
     original_indices = np.asarray(sample_info["indices"], dtype=int)
     X_used = target_info["X"]
@@ -1167,7 +1368,55 @@ def run_multilabel_model_probes(
             "indices": original_indices[relative_indices].tolist(),
             "target_memory_sampling": True,
         }
+    dense_consumers = ("smooth_nonlinear_probe",) + (
+        ("kernel_approximation_probe",) if budget["run_kernel_probe"] else ()
+    )
+    skip_start = len(report_context.setdefault("skipped_diagnostics", []))
+    dense_info = _ensure_dense_X_for_multilabel(
+        X_used,
+        Y_used,
+        reason="multilabel_probe_family_alignment",
+        config=config,
+        report_context=report_context,
+        groups=groups_used,
+    )
+    dense_X: np.ndarray | None
+    dense_unavailable_reason: str | None = None
+    if dense_info["skipped"]:
+        dense_X = None
+        dense_unavailable_reason = "dense conversion unavailable under current policy"
+        _record_dense_probe_skips(
+            report_context,
+            skip_start=skip_start,
+            consumers=dense_consumers,
+            reason=dense_unavailable_reason,
+        )
+    else:
+        dense_relative_indices = np.asarray(dense_info["indices"], dtype=int)
+        X_used = _slice_rows(X_used, dense_relative_indices)
+        Y_used = dense_info["Y"]
+        groups_used = dense_info.get("groups")
+        dense_X = np.asarray(dense_info["X"])
+        sample_info = _compose_sample_info(sample_info, dense_relative_indices)
+
     y_dense = _dense_multilabel_matrix(Y_used)
+    cv, cv_method = choose_multilabel_cv(
+        Y_used,
+        max_folds=budget["cv_folds"],
+        config=config,
+        groups=groups_used,
+    )
+    cv, evaluation = materialize_evaluation_plan(
+        cv,
+        X_used,
+        y_dense,
+        method=cv_method,
+        row_indices=np.asarray(sample_info["indices"], dtype=int),
+        groups=groups_used,
+    )
+    evaluation["row_indices"] = sample_info["indices"]
+    evaluation_plan_id = str(evaluation["evaluation_plan_id"])
+
     n_neighbors = min(
         max(1, y_dense.shape[0] - 1),
         min(15, max(3, int(np.sqrt(y_dense.shape[0])))),
@@ -1193,25 +1442,20 @@ def run_multilabel_model_probes(
             label_names=label_names,
             sample_info=sample_info,
             groups=groups_used,
+            cv=cv,
+            cv_method=cv_method,
+            evaluation_plan_id=evaluation_plan_id,
         )
 
-    dense_info = _ensure_dense_X_for_multilabel(
-        X_used,
-        Y_used,
-        reason="smooth_nonlinear_probe",
-        config=config,
-        report_context=report_context,
-        groups=groups_used,
-    )
-    if dense_info["skipped"]:
+    if dense_X is None:
         results["smooth_poly"] = {
-            "skipped_reason": "dense conversion unavailable under current policy",
+            "skipped_reason": dense_unavailable_reason,
             "model_name": "PolynomialFeatures+OneVsRestLogisticRegression",
             "sample_info": sample_info,
+            "evaluation_plan_id": evaluation_plan_id,
         }
     else:
-        dense_X = np.asarray(dense_info["X"])
-        dense_Y = dense_info["Y"]
+        dense_Y = Y_used
         dtype = dense_X.dtype if dense_X.dtype is not None else np.dtype(float)
         expanded_features = _quadratic_feature_count(dense_X.shape[1])
         expanded_mb = _estimate_dense_mb(dense_X.shape[0], expanded_features, dtype)
@@ -1235,7 +1479,10 @@ def run_multilabel_model_probes(
                 budget=budget,
                 label_names=label_names,
                 sample_info=sample_info,
-                groups=dense_info.get("groups"),
+                groups=groups_used,
+                cv=cv,
+                cv_method=cv_method,
+                evaluation_plan_id=evaluation_plan_id,
             )
             results["smooth_poly"].update(metadata)
             results["smooth_poly"]["probe_variant"] = _FULL_QUADRATIC_VARIANT
@@ -1257,6 +1504,7 @@ def run_multilabel_model_probes(
                     **metadata,
                     "skipped_reason": _SMOOTH_PROBE_SKIP_REASON,
                     "model_name": "PolynomialCountSketch+OneVsRestLogisticRegression",
+                    "evaluation_plan_id": evaluation_plan_id,
                 }
             else:
                 results["smooth_poly"] = _evaluate_multilabel_probe(
@@ -1270,26 +1518,22 @@ def run_multilabel_model_probes(
                     budget=budget,
                     label_names=label_names,
                     sample_info=sample_info,
-                    groups=dense_info.get("groups"),
+                    groups=groups_used,
+                    cv=cv,
+                    cv_method=cv_method,
+                    evaluation_plan_id=evaluation_plan_id,
                 )
                 results["smooth_poly"].update(metadata)
                 results["smooth_poly"]["probe_variant"] = _LOW_RANK_QUADRATIC_VARIANT
                 results["smooth_poly"]["sketch_n_components"] = int(sketch_components)
 
     if budget["run_kernel_probe"]:
-        kernel_info = _ensure_dense_X_for_multilabel(
-            X_used,
-            Y_used,
-            reason="kernel_approximation_probe",
-            config=config,
-            report_context=report_context,
-            groups=groups_used,
-        )
-        if kernel_info["skipped"]:
+        if dense_X is None:
             results["kernel_approx"] = {
-                "skipped_reason": "dense conversion unavailable under current policy",
+                "skipped_reason": dense_unavailable_reason,
                 "model_name": "RBFSampler+OneVsRestSGDClassifier",
                 "sample_info": sample_info,
+                "evaluation_plan_id": evaluation_plan_id,
             }
         else:
             estimator = Pipeline(
@@ -1298,10 +1542,8 @@ def run_multilabel_model_probes(
                     (
                         "rff",
                         RBFSampler(
-                            gamma=1.0 / max(1, kernel_info["X"].shape[1]),
-                            n_components=min(
-                                256, max(32, kernel_info["X"].shape[1] * 2)
-                            ),
+                            gamma=1.0 / max(1, dense_X.shape[1]),
+                            n_components=min(256, max(32, dense_X.shape[1] * 2)),
                             random_state=config.random_state,
                         ),
                     ),
@@ -1324,18 +1566,33 @@ def run_multilabel_model_probes(
             results["kernel_approx"] = _evaluate_multilabel_probe(
                 "RBFSampler+OneVsRestSGDClassifier",
                 estimator,
-                kernel_info["X"],
-                kernel_info["Y"],
+                dense_X,
+                Y_used,
                 config=config,
                 budget=budget,
                 label_names=label_names,
                 sample_info=sample_info,
-                groups=kernel_info.get("groups"),
+                groups=groups_used,
+                cv=cv,
+                cv_method=cv_method,
+                evaluation_plan_id=evaluation_plan_id,
             )
     else:
         results["kernel_approx"] = {
             "skipped_reason": "kernel probe disabled for this budget",
             "model_name": "RBFSampler+OneVsRestSGDClassifier",
             "sample_info": sample_info,
+            "evaluation_plan_id": evaluation_plan_id,
         }
-    return results
+    paired = build_paired_probe_comparisons(
+        results,
+        y_dense,
+        target_mode="multilabel",
+        requested_resamples=budget["pairwise_resamples"],
+        random_state=config.random_state,
+        evaluation_plan_id=evaluation_plan_id,
+        evaluation_available=evaluation.get("alignment_status") == "aligned",
+        groups=groups_used,
+        names=label_names,
+    )
+    return ProbeRunResult(results, evaluation, paired)

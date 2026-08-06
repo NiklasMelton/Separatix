@@ -28,6 +28,7 @@ from separatix.densify import (
     ensure_dense_or_sample,
     ensure_dense_or_sample_regression,
 )
+from separatix.models.comparison import bootstrap_comparison as _bootstrap_comparison
 from separatix.models.probes import (
     _choose_sketch_components,
     _dense_multilabel_matrix,
@@ -59,7 +60,6 @@ from separatix.sampling import (
     choose_multilabel_cv,
     choose_multilabel_holdout,
 )
-from separatix.utils.random import make_rng
 from separatix.utils.warnings import record_warning
 
 _MLP_BUDGETS: dict[str, dict[str, int]] = {
@@ -1102,36 +1102,6 @@ def _safe_evaluate_models(
     return results
 
 
-def _bootstrap_indices(
-    n_rows: int,
-    *,
-    repeats: int,
-    random_state: int | None,
-    groups: np.ndarray | None = None,
-) -> list[np.ndarray]:
-    """Return bootstrap index sets, preserving groups when requested."""
-    rng = make_rng(random_state)
-    if groups is None:
-        return [
-            np.sort(rng.choice(np.arange(n_rows), size=n_rows, replace=True)).astype(
-                int
-            )
-            for _ in range(repeats)
-        ]
-    unique_groups = np.unique(groups)
-    group_rows = [np.flatnonzero(groups == group_id) for group_id in unique_groups]
-    samples: list[np.ndarray] = []
-    for _ in range(repeats):
-        chosen = rng.choice(
-            np.arange(unique_groups.shape[0]), size=unique_groups.shape[0], replace=True
-        )
-        sampled = np.concatenate([group_rows[int(index)] for index in chosen]).astype(
-            int
-        )
-        samples.append(np.sort(sampled))
-    return samples
-
-
 def _balanced_accuracy_delta(
     y_true: np.ndarray,
     first_pred: np.ndarray,
@@ -1198,36 +1168,6 @@ def _regression_metric_delta(
         target_names=target_names,
     )
     return float(first[metric] - second[metric])
-
-
-def _bootstrap_comparison(
-    delta_fn: Callable[[np.ndarray], float],
-    *,
-    repeats: int,
-    random_state: int | None,
-    n_rows: int,
-    groups: np.ndarray | None = None,
-) -> dict[str, float]:
-    """Return paired bootstrap delta summaries."""
-    deltas = np.asarray(
-        [
-            delta_fn(sample_idx)
-            for sample_idx in _bootstrap_indices(
-                n_rows,
-                repeats=repeats,
-                random_state=random_state,
-                groups=groups,
-            )
-        ],
-        dtype=float,
-    )
-    if deltas.size == 0:
-        return {"mean_delta": 0.0, "lower_95": 0.0, "upper_95": 0.0}
-    return {
-        "mean_delta": float(np.mean(deltas)),
-        "lower_95": float(np.percentile(deltas, 2.5)),
-        "upper_95": float(np.percentile(deltas, 97.5)),
-    }
 
 
 def _objective_score(result: dict[str, Any], *, metrics: tuple[str, ...]) -> float:

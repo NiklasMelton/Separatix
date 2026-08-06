@@ -26,6 +26,7 @@ from separatix.constants import (
     SMOOTH_NONLINEAR_RECOMMENDED,
     SMOOTH_NONLINEAR_RESPONSE_RECOMMENDED,
 )
+from separatix.models.comparison import lookup_paired_comparison
 
 MIN_NORMALIZED_SCORE = 0.0
 MAX_NORMALIZED_SCORE = 1.0
@@ -285,9 +286,21 @@ def _combined_standard_error(
 def _family_within_one_standard_error(
     family: _FamilyEvidence,
     best_family: _FamilyEvidence,
+    paired_payload: dict[str, Any] | None = None,
 ) -> bool:
     if family.score is None or best_family.score is None:
         return False
+    paired = lookup_paired_comparison(
+        paired_payload or {},
+        best_family.best_probe,
+        family.best_probe,
+        "balanced_accuracy",
+    )
+    if paired is not None:
+        tolerance = float(paired["paired_standard_error"])
+        return bool(
+            float(paired["point_delta"]) <= max(tolerance, MIN_FAMILY_IMPROVEMENT)
+        )
     combined_error = _combined_standard_error(family, best_family)
     tolerance = ONE_STANDARD_ERROR * (
         combined_error if combined_error is not None else MIN_NORMALIZED_SCORE
@@ -300,6 +313,7 @@ def _family_within_one_standard_error(
 def _family_comparison(
     first: _FamilyEvidence,
     second: _FamilyEvidence,
+    paired_payload: dict[str, Any] | None = None,
 ) -> dict[str, float | bool | str | None]:
     if first.score is None or second.score is None:
         return {
@@ -310,9 +324,40 @@ def _family_comparison(
             "z_score": None,
             "first_clearly_better": False,
             "second_clearly_better": False,
+            "decision_method": "unavailable",
+            "fallback_reason": "one or both family scores are unavailable",
         }
+    paired = lookup_paired_comparison(
+        paired_payload or {}, first.best_probe, second.best_probe, "balanced_accuracy"
+    )
     combined_error = _combined_standard_error(first, second)
     score_gap = first.score - second.score
+    if paired is not None:
+        paired_error = float(paired["paired_standard_error"])
+        point_delta = float(paired["point_delta"])
+        lower = float(paired["lower_95"])
+        upper = float(paired["upper_95"])
+        return {
+            "first_family": first.family,
+            "second_family": second.family,
+            "first_probe": first.best_probe,
+            "second_probe": second.best_probe,
+            "score_gap": point_delta,
+            "combined_standard_error": combined_error,
+            "paired_standard_error": paired_error,
+            "lower_95": lower,
+            "upper_95": upper,
+            "z_score": point_delta / paired_error if paired_error > 0 else None,
+            "clear_advantage_z": SIGNAL_CONFIDENCE_Z,
+            "first_clearly_better": bool(
+                point_delta > MIN_FAMILY_IMPROVEMENT and lower > 0.0
+            ),
+            "second_clearly_better": bool(
+                -point_delta > MIN_FAMILY_IMPROVEMENT and upper < 0.0
+            ),
+            "decision_method": "paired_oof_bootstrap",
+            "fallback_reason": None,
+        }
     tolerance = combined_error or MIN_NORMALIZED_SCORE
     z_score = score_gap / tolerance if tolerance > 0 else None
     return {
@@ -328,12 +373,15 @@ def _family_comparison(
         "second_clearly_better": bool(
             -score_gap > max(SIGNAL_CONFIDENCE_Z * tolerance, MIN_FAMILY_IMPROVEMENT)
         ),
+        "decision_method": "marginal_standard_error_fallback",
+        "fallback_reason": "paired aligned predictions were unavailable",
     }
 
 
 def _recommended_family(
     families: dict[str, _FamilyEvidence],
     raw_best_family: _FamilyEvidence | None,
+    paired_payload: dict[str, Any] | None = None,
 ) -> str | None:
     """Choose a family by conservative escalation from simpler to more complex."""
     if raw_best_family is None:
@@ -342,14 +390,14 @@ def _recommended_family(
     smooth = families["smooth_nonlinear"]
     local = families["local_kernel"]
 
-    if _family_within_one_standard_error(linear, raw_best_family):
+    if _family_within_one_standard_error(linear, raw_best_family, paired_payload):
         return "linear"
     if smooth.score is None:
         return local.family if local.score is not None else raw_best_family.family
     if local.score is None:
         return smooth.family
 
-    local_vs_smooth = _family_comparison(local, smooth)
+    local_vs_smooth = _family_comparison(local, smooth, paired_payload)
     if local_vs_smooth["first_clearly_better"]:
         return local.family
     return smooth.family
@@ -445,6 +493,7 @@ def _quality_flags(
     warning_count: int,
     best_family: _FamilyEvidence | None,
     dummy_family: _FamilyEvidence,
+    paired_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     flags: list[dict[str, Any]] = []
     if not dummy_family.available:
@@ -538,15 +587,38 @@ def _quality_flags(
         )
 
     signal_error = _combined_standard_error(best_family, dummy_family)
+    paired_signal = (
+        lookup_paired_comparison(
+            paired_payload or {},
+            best_family.best_probe,
+            dummy_family.best_probe,
+            "balanced_accuracy",
+        )
+        if best_family is not None
+        else None
+    )
     if (
         best_family is not None
         and best_family.score is not None
         and dummy_family.score is not None
-        and signal_error is not None
+        and (paired_signal is not None or signal_error is not None)
         and (
-            best_family.score - dummy_family.score <= MIN_SIGNAL_MARGIN
-            or (SIGNAL_CONFIDENCE_Z * signal_error)
-            >= abs(best_family.score - dummy_family.score)
+            (
+                paired_signal is not None
+                and (
+                    float(paired_signal["point_delta"]) <= MIN_SIGNAL_MARGIN
+                    or float(paired_signal["lower_95"]) <= 0.0
+                )
+            )
+            or (
+                paired_signal is None
+                and signal_error is not None
+                and (
+                    best_family.score - dummy_family.score <= MIN_SIGNAL_MARGIN
+                    or (SIGNAL_CONFIDENCE_Z * signal_error)
+                    >= abs(best_family.score - dummy_family.score)
+                )
+            )
         )
     ):
         flags.append(
@@ -555,12 +627,12 @@ def _quality_flags(
                 "severity": "caution",
                 "message": (
                     "The best probe's advantage over the dummy baseline does not "
-                    "clear a 95% normal-approximation signal check."
+                    "clear the configured uncertainty-aware signal check."
                 ),
             }
         )
     local_vs_smooth = _family_comparison(
-        families["local_kernel"], families["smooth_nonlinear"]
+        families["local_kernel"], families["smooth_nonlinear"], paired_payload
     )
     local_score = families["local_kernel"].score
     smooth_score = families["smooth_nonlinear"].score
@@ -631,19 +703,40 @@ def _build_recommendation_evidence(
 ) -> dict[str, Any]:
     probes = _probe_evidence(metrics)
     families = _family_evidence(probes)
+    paired_payload = metrics.get("paired_probe_comparisons", {})
     raw_best_family = _best_predictive_family(families)
     dummy_family = families["dummy"]
-    candidate_family = _recommended_family(families, raw_best_family)
+    candidate_family = _recommended_family(families, raw_best_family, paired_payload)
     signal_error = _combined_standard_error(raw_best_family, dummy_family)
+    signal_paired = (
+        lookup_paired_comparison(
+            paired_payload,
+            raw_best_family.best_probe,
+            dummy_family.best_probe,
+            "balanced_accuracy",
+        )
+        if raw_best_family is not None
+        else None
+    )
     best_clearly_beats_dummy = (
         bool(
             raw_best_family is not None
             and raw_best_family.score is not None
             and dummy_family.score is not None
-            and signal_error is not None
-            and raw_best_family.score - dummy_family.score
-            > SIGNAL_CONFIDENCE_Z * signal_error
-            and raw_best_family.score - dummy_family.score > MIN_SIGNAL_MARGIN
+            and (
+                (
+                    signal_paired is not None
+                    and float(signal_paired["point_delta"]) > MIN_SIGNAL_MARGIN
+                    and float(signal_paired["lower_95"]) > 0.0
+                )
+                or (
+                    signal_paired is None
+                    and signal_error is not None
+                    and raw_best_family.score - dummy_family.score
+                    > SIGNAL_CONFIDENCE_Z * signal_error
+                    and raw_best_family.score - dummy_family.score > MIN_SIGNAL_MARGIN
+                )
+            )
         )
         if dummy_family.available
         else False
@@ -651,12 +744,13 @@ def _build_recommendation_evidence(
     recommended_family = candidate_family if best_clearly_beats_dummy else None
 
     smooth_vs_local = _family_comparison(
-        families["local_kernel"], families["smooth_nonlinear"]
+        families["local_kernel"], families["smooth_nonlinear"], paired_payload
     )
     raw_best_vs_recommended = (
         _family_comparison(
             families[raw_best_family.family],
             families[recommended_family],
+            paired_payload,
         )
         if raw_best_family is not None and recommended_family is not None
         else None
@@ -669,6 +763,7 @@ def _build_recommendation_evidence(
         warning_count=warning_count,
         best_family=raw_best_family,
         dummy_family=dummy_family,
+        paired_payload=paired_payload,
     )
     best_score = raw_best_family.score if raw_best_family is not None else None
     dummy_score = dummy_family.score
@@ -705,6 +800,20 @@ def _build_recommendation_evidence(
             float(signal_margin) if signal_margin is not None else None
         ),
         "signal_combined_standard_error": signal_error,
+        "signal_comparison": {
+            **signal_paired,
+            "decision_method": "paired_oof_bootstrap",
+            "fallback_reason": None,
+        }
+        if signal_paired is not None
+        else {
+            "decision_method": "marginal_standard_error_fallback",
+            "fallback_reason": "paired aligned predictions were unavailable",
+            "point_delta": signal_margin,
+            "paired_standard_error": None,
+            "lower_95": None,
+            "upper_95": None,
+        },
         "signal_z_score": (
             float(signal_margin / signal_error)
             if signal_margin is not None
@@ -882,6 +991,20 @@ def _mlp_architecture_note(metrics: dict[str, Any]) -> str | None:
     return f"Selected optional MLP architecture: {probe_name}."
 
 
+def _comparison_method_note(metrics: dict[str, Any]) -> str:
+    """Return a decision-path note describing family-comparison uncertainty."""
+    paired = metrics.get("paired_probe_comparisons", {})
+    if paired.get("status") == "available":
+        return (
+            "Probe-family decisions used paired bootstrap intervals over aligned "
+            "out-of-fold predictions."
+        )
+    return (
+        "Paired out-of-fold comparisons were unavailable, so affected decisions "
+        "used marginal uncertainty estimates."
+    )
+
+
 def make_recommendation(
     scores: dict[str, float | None], metrics: dict[str, Any]
 ) -> tuple[str, str, list[str], dict[str, str]]:
@@ -911,10 +1034,6 @@ def make_recommendation(
     else:
         raw_best_family = evidence["raw_best_family"]
         selected_family = evidence["recommended_family"]
-        decision_path.append(
-            "Probe families were compared with conservative escalation: "
-            f"raw_best={raw_best_family}, recommended={selected_family}."
-        )
         recommendation = _recommend_selected_family(evidence)
         if selected_family == "linear":
             decision_path.append(
@@ -944,10 +1063,19 @@ def make_recommendation(
             decision_path.append(
                 "No predictive family satisfied the evidence-selection rule."
             )
+        decision_path.append(
+            "Probe families were compared with conservative escalation: "
+            f"raw_best={raw_best_family}, recommended={selected_family}."
+        )
 
     if _mlp_override_active(metrics):
         mlp_payload = _mlp_override_payload(metrics)
         recommendation = FEEDFORWARD_MLP_RECOMMENDED
+        decision_path.insert(
+            0,
+            "The optional MLP probe clearly improved over the aligned simpler "
+            "families and satisfied the configured override criteria.",
+        )
         decision_path.append(
             "Conditional MLP probes were only run because simpler probes did not "
             "meet the configured absolute-skill threshold."
@@ -962,6 +1090,8 @@ def make_recommendation(
     if quality_flags:
         flag_names = ", ".join(flag["name"] for flag in quality_flags)
         decision_path.append(f"Evidence quality flags: {flag_names}.")
+
+    decision_path.append(_comparison_method_note(metrics))
 
     confidence = _confidence_from_evidence(recommendation, evidence)
     interpretations["signal"] = (
@@ -1078,21 +1208,55 @@ def _multilabel_combined_error(
     return float(sqrt(first["standard_error"] ** 2 + second["standard_error"] ** 2))
 
 
-def _multilabel_clearly_better(first: dict[str, Any], second: dict[str, Any]) -> bool:
+def _paired_metric_entry(
+    first: dict[str, Any],
+    second: dict[str, Any],
+    metric: str,
+    paired_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return paired evidence for two per-metric family entries."""
+    return lookup_paired_comparison(
+        paired_payload or {}, first.get("probe"), second.get("probe"), metric
+    )
+
+
+def _multilabel_clearly_better(
+    first: dict[str, Any],
+    second: dict[str, Any],
+    *,
+    metric: str,
+    paired_payload: dict[str, Any] | None = None,
+) -> bool:
     """Return whether first clearly beats second for higher-is-better metrics."""
     if first["score"] is None or second["score"] is None:
         return False
+    paired = _paired_metric_entry(first, second, metric, paired_payload)
+    if paired is not None:
+        return bool(
+            float(paired["point_delta"]) > MIN_FAMILY_IMPROVEMENT
+            and float(paired["lower_95"]) > 0.0
+        )
     error = _multilabel_combined_error(first, second)
     tolerance = error if error is not None else 0.0
     return bool(first["score"] - second["score"] > SIGNAL_CONFIDENCE_Z * tolerance)
 
 
 def _multilabel_within_one_standard_error(
-    first: dict[str, Any], second: dict[str, Any]
+    first: dict[str, Any],
+    second: dict[str, Any],
+    *,
+    metric: str,
+    paired_payload: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether first is within one standard error of second."""
     if first["score"] is None or second["score"] is None:
         return False
+    paired = _paired_metric_entry(second, first, metric, paired_payload)
+    if paired is not None:
+        return bool(
+            float(paired["point_delta"])
+            <= max(float(paired["paired_standard_error"]), MIN_FAMILY_IMPROVEMENT)
+        )
     error = _multilabel_combined_error(first, second)
     tolerance = error if error is not None else 0.0
     return bool(second["score"] - first["score"] <= tolerance)
@@ -1119,27 +1283,63 @@ def _best_multilabel_family_for_metric(
 
 
 def _multilabel_comparison_counts(
-    evidence: dict[str, Any], first: str, second: str
+    evidence: dict[str, Any],
+    first: str,
+    second: str,
+    paired_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Count clear and within-error comparisons across primary metrics."""
     clear = []
     within = []
     worse = []
+    metric_comparisons: dict[str, Any] = {}
     for metric in _MULTILABEL_PRIMARY_METRICS:
         first_item = evidence[first][metric]
         second_item = evidence[second][metric]
-        if _multilabel_clearly_better(first_item, second_item):
+        paired = _paired_metric_entry(first_item, second_item, metric, paired_payload)
+        if _multilabel_clearly_better(
+            first_item,
+            second_item,
+            metric=metric,
+            paired_payload=paired_payload,
+        ):
             clear.append(metric)
-        if _multilabel_within_one_standard_error(first_item, second_item):
+        if _multilabel_within_one_standard_error(
+            first_item,
+            second_item,
+            metric=metric,
+            paired_payload=paired_payload,
+        ):
             within.append(metric)
-        if _multilabel_clearly_better(second_item, first_item):
+        if _multilabel_clearly_better(
+            second_item,
+            first_item,
+            metric=metric,
+            paired_payload=paired_payload,
+        ):
             worse.append(metric)
+        metric_comparisons[metric] = (
+            {
+                **paired,
+                "decision_method": "paired_oof_bootstrap",
+                "fallback_reason": None,
+            }
+            if paired is not None
+            else {
+                "decision_method": "marginal_standard_error_fallback",
+                "fallback_reason": "paired aligned predictions were unavailable",
+                "point_delta": None
+                if first_item["score"] is None or second_item["score"] is None
+                else float(first_item["score"] - second_item["score"]),
+            }
+        )
     return {
         "first_family": first,
         "second_family": second,
         "clear_metrics": clear,
         "within_one_standard_error_metrics": within,
         "clearly_worse_metrics": worse,
+        "metric_comparisons": metric_comparisons,
     }
 
 
@@ -1261,7 +1461,9 @@ def compute_multilabel_scores(
 ) -> dict[str, float | None]:
     """Compute transparent multilabel compatibility scores and evidence."""
     family_metrics = _multilabel_family_metric_evidence(metrics)
+    paired_payload = metrics.get("paired_probe_comparisons", {})
     signal_metrics = []
+    signal_comparisons: dict[str, Any] = {}
     best_by_metric: dict[str, Any] = {}
     for metric in _MULTILABEL_PRIMARY_METRICS:
         best_family, best_item = _best_multilabel_family_for_metric(
@@ -1272,18 +1474,39 @@ def compute_multilabel_scores(
             "probe": best_item["probe"] if best_item else None,
             "score": best_item["score"] if best_item else None,
         }
+        dummy_item = family_metrics["dummy"][metric]
+        paired_signal = (
+            _paired_metric_entry(best_item, dummy_item, metric, paired_payload)
+            if best_item is not None
+            else None
+        )
+        signal_comparisons[metric] = (
+            {
+                **paired_signal,
+                "decision_method": "paired_oof_bootstrap",
+                "fallback_reason": None,
+            }
+            if paired_signal is not None
+            else {
+                "decision_method": "marginal_standard_error_fallback",
+                "fallback_reason": "paired aligned predictions were unavailable",
+            }
+        )
         if best_item is not None and _multilabel_clearly_better(
-            best_item, family_metrics["dummy"][metric]
+            best_item,
+            dummy_item,
+            metric=metric,
+            paired_payload=paired_payload,
         ):
             signal_metrics.append(metric)
 
     comparisons = {
         "linear_vs_best": {},
         "smooth_vs_linear": _multilabel_comparison_counts(
-            family_metrics, "smooth_nonlinear", "linear"
+            family_metrics, "smooth_nonlinear", "linear", paired_payload
         ),
         "local_kernel_vs_smooth": _multilabel_comparison_counts(
-            family_metrics, "local_kernel", "smooth_nonlinear"
+            family_metrics, "local_kernel", "smooth_nonlinear", paired_payload
         ),
     }
     for metric in _MULTILABEL_PRIMARY_METRICS:
@@ -1295,10 +1518,14 @@ def compute_multilabel_scores(
             "linear_within_one_standard_error": _multilabel_within_one_standard_error(
                 family_metrics["linear"][metric],
                 family_metrics[best_family][metric],
+                metric=metric,
+                paired_payload=paired_payload,
             ),
             "linear_clearly_worse": _multilabel_clearly_better(
                 family_metrics[best_family][metric],
                 family_metrics["linear"][metric],
+                metric=metric,
+                paired_payload=paired_payload,
             ),
         }
 
@@ -1317,6 +1544,7 @@ def compute_multilabel_scores(
         "families": family_metrics,
         "best_by_metric": best_by_metric,
         "signal_metrics_beating_dummy": signal_metrics,
+        "signal_comparisons": signal_comparisons,
         "best_clearly_beats_dummy_on_two_primary_metrics": len(signal_metrics) >= 2,
         "family_comparisons": comparisons,
         "topology_available": bool(
@@ -1360,10 +1588,7 @@ def make_multilabel_recommendation(
     """Generate a conservative multilabel recommendation and decision path."""
     evidence = metrics["multilabel_recommendation_evidence"]
     flags = evidence["quality_flags"]
-    decision_path = [
-        "This run used the multilabel diagnostic path; probe families were "
-        "compared across micro F1, macro F1, and sample Jaccard."
-    ]
+    decision_path: list[str] = []
     if any(flag.get("severity") == "blocking" for flag in flags):
         recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
         decision_path.append(
@@ -1439,6 +1664,11 @@ def make_multilabel_recommendation(
     if _mlp_override_active(metrics):
         mlp_payload = _mlp_override_payload(metrics)
         recommendation = FEEDFORWARD_MLP_RECOMMENDED
+        decision_path.insert(
+            0,
+            "The optional MLP probe clearly improved over the aligned simpler "
+            "multilabel families and satisfied the configured override criteria.",
+        )
         decision_path.append(
             "Conditional MLP probes were only run because simpler multilabel "
             "probes did not meet the configured absolute-skill threshold."
@@ -1455,6 +1685,11 @@ def make_multilabel_recommendation(
             + ", ".join(str(flag["name"]) for flag in flags)
             + "."
         )
+    decision_path.append(
+        "This run used the multilabel diagnostic path; probe families were "
+        "compared across micro F1, macro F1, and sample Jaccard."
+    )
+    decision_path.append(_comparison_method_note(metrics))
     confidence = "low" if recommendation == INCONCLUSIVE else "medium"
     if recommendation == INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY:
         confidence = "low"
@@ -1561,21 +1796,43 @@ def _regression_combined_error(
     return float(sqrt(first["standard_error"] ** 2 + second["standard_error"] ** 2))
 
 
-def _regression_clearly_better(first: dict[str, Any], second: dict[str, Any]) -> bool:
+def _regression_clearly_better(
+    first: dict[str, Any],
+    second: dict[str, Any],
+    *,
+    metric: str,
+    paired_payload: dict[str, Any] | None = None,
+) -> bool:
     """Return whether first clearly beats second for higher-is-better metrics."""
     if first["score"] is None or second["score"] is None:
         return False
+    paired = _paired_metric_entry(first, second, metric, paired_payload)
+    if paired is not None:
+        return bool(
+            float(paired["point_delta"]) > MIN_FAMILY_IMPROVEMENT
+            and float(paired["lower_95"]) > 0.0
+        )
     error = _regression_combined_error(first, second)
     tolerance = error if error is not None else 0.0
     return bool(first["score"] - second["score"] > SIGNAL_CONFIDENCE_Z * tolerance)
 
 
 def _regression_within_one_standard_error(
-    first: dict[str, Any], second: dict[str, Any]
+    first: dict[str, Any],
+    second: dict[str, Any],
+    *,
+    metric: str,
+    paired_payload: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether first is within one standard error of second."""
     if first["score"] is None or second["score"] is None:
         return False
+    paired = _paired_metric_entry(second, first, metric, paired_payload)
+    if paired is not None:
+        return bool(
+            float(paired["point_delta"])
+            <= max(float(paired["paired_standard_error"]), MIN_FAMILY_IMPROVEMENT)
+        )
     error = _regression_combined_error(first, second)
     tolerance = error if error is not None else 0.0
     return bool(second["score"] - first["score"] <= tolerance)
@@ -1599,27 +1856,63 @@ def _best_regression_family_for_metric(
 
 
 def _regression_comparison_counts(
-    evidence: dict[str, Any], first: str, second: str
+    evidence: dict[str, Any],
+    first: str,
+    second: str,
+    paired_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Count clear and within-error comparisons across regression metrics."""
     clear = []
     within = []
     worse = []
+    metric_comparisons: dict[str, Any] = {}
     for metric in _REGRESSION_PRIMARY_METRICS:
         first_item = evidence[first][metric]
         second_item = evidence[second][metric]
-        if _regression_clearly_better(first_item, second_item):
+        paired = _paired_metric_entry(first_item, second_item, metric, paired_payload)
+        if _regression_clearly_better(
+            first_item,
+            second_item,
+            metric=metric,
+            paired_payload=paired_payload,
+        ):
             clear.append(metric)
-        if _regression_within_one_standard_error(first_item, second_item):
+        if _regression_within_one_standard_error(
+            first_item,
+            second_item,
+            metric=metric,
+            paired_payload=paired_payload,
+        ):
             within.append(metric)
-        if _regression_clearly_better(second_item, first_item):
+        if _regression_clearly_better(
+            second_item,
+            first_item,
+            metric=metric,
+            paired_payload=paired_payload,
+        ):
             worse.append(metric)
+        metric_comparisons[metric] = (
+            {
+                **paired,
+                "decision_method": "paired_oof_bootstrap",
+                "fallback_reason": None,
+            }
+            if paired is not None
+            else {
+                "decision_method": "marginal_standard_error_fallback",
+                "fallback_reason": "paired aligned predictions were unavailable",
+                "point_delta": None
+                if first_item["score"] is None or second_item["score"] is None
+                else float(first_item["score"] - second_item["score"]),
+            }
+        )
     return {
         "first_family": first,
         "second_family": second,
         "clear_metrics": clear,
         "within_one_standard_error_metrics": within,
         "clearly_worse_metrics": worse,
+        "metric_comparisons": metric_comparisons,
     }
 
 
@@ -1694,7 +1987,9 @@ def compute_regression_scores(
 ) -> dict[str, float | None]:
     """Compute transparent regression compatibility scores and evidence."""
     family_metrics = _regression_family_metric_evidence(metrics)
+    paired_payload = metrics.get("paired_probe_comparisons", {})
     signal_metrics = []
+    signal_comparisons: dict[str, Any] = {}
     best_by_metric: dict[str, Any] = {}
     for metric in _REGRESSION_PRIMARY_METRICS:
         best_family, best_item = _best_regression_family_for_metric(
@@ -1705,18 +2000,39 @@ def compute_regression_scores(
             "probe": best_item["probe"] if best_item else None,
             "score": best_item["score"] if best_item else None,
         }
+        dummy_item = family_metrics["dummy"][metric]
+        paired_signal = (
+            _paired_metric_entry(best_item, dummy_item, metric, paired_payload)
+            if best_item is not None
+            else None
+        )
+        signal_comparisons[metric] = (
+            {
+                **paired_signal,
+                "decision_method": "paired_oof_bootstrap",
+                "fallback_reason": None,
+            }
+            if paired_signal is not None
+            else {
+                "decision_method": "marginal_standard_error_fallback",
+                "fallback_reason": "paired aligned predictions were unavailable",
+            }
+        )
         if best_item is not None and _regression_clearly_better(
-            best_item, family_metrics["dummy"][metric]
+            best_item,
+            dummy_item,
+            metric=metric,
+            paired_payload=paired_payload,
         ):
             signal_metrics.append(metric)
 
     comparisons = {
         "linear_vs_best": {},
         "smooth_vs_linear": _regression_comparison_counts(
-            family_metrics, "smooth_nonlinear", "linear"
+            family_metrics, "smooth_nonlinear", "linear", paired_payload
         ),
         "local_kernel_vs_smooth": _regression_comparison_counts(
-            family_metrics, "local_kernel", "smooth_nonlinear"
+            family_metrics, "local_kernel", "smooth_nonlinear", paired_payload
         ),
     }
     for metric in _REGRESSION_PRIMARY_METRICS:
@@ -1728,10 +2044,14 @@ def compute_regression_scores(
             "linear_within_one_standard_error": _regression_within_one_standard_error(
                 family_metrics["linear"][metric],
                 family_metrics[best_family][metric],
+                metric=metric,
+                paired_payload=paired_payload,
             ),
             "linear_clearly_worse": _regression_clearly_better(
                 family_metrics[best_family][metric],
                 family_metrics["linear"][metric],
+                metric=metric,
+                paired_payload=paired_payload,
             ),
         }
 
@@ -1751,6 +2071,7 @@ def compute_regression_scores(
         "families": family_metrics,
         "best_by_metric": best_by_metric,
         "signal_metrics_beating_dummy": signal_metrics,
+        "signal_comparisons": signal_comparisons,
         "best_clearly_beats_dummy_on_primary_metrics": len(signal_metrics) >= 1,
         "family_comparisons": comparisons,
         "topology_available": bool(
@@ -1810,10 +2131,7 @@ def make_regression_recommendation(
     """Generate a conservative regression recommendation and decision path."""
     evidence = metrics["regression_recommendation_evidence"]
     flags = evidence["quality_flags"]
-    decision_path = [
-        "This run used the explicit regression diagnostic path; probe families "
-        "were compared across variance-weighted and uniform-average R2."
-    ]
+    decision_path: list[str] = []
     if any(flag.get("severity") == "blocking" for flag in flags):
         recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY
         decision_path.append(
@@ -1880,6 +2198,11 @@ def make_regression_recommendation(
     if _mlp_override_active(metrics):
         mlp_payload = _mlp_override_payload(metrics)
         recommendation = FEEDFORWARD_MLP_REGRESSION_RECOMMENDED
+        decision_path.insert(
+            0,
+            "The optional MLP probe clearly improved over the aligned simpler "
+            "regression families and satisfied the configured override criteria.",
+        )
         decision_path.append(
             "Conditional MLP probes were only run because simpler regression "
             "probes did not meet the configured absolute-skill threshold."
@@ -1906,6 +2229,11 @@ def make_regression_recommendation(
             "Hard-subset topology was unavailable or skipped; optional topology "
             "did not alter the recommendation or confidence."
         )
+    decision_path.append(
+        "This run used the explicit regression diagnostic path; probe families "
+        "were compared across variance-weighted and uniform-average R2."
+    )
+    decision_path.append(_comparison_method_note(metrics))
     confidence = (
         "low"
         if recommendation
