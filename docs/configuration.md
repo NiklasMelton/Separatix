@@ -35,12 +35,15 @@ MLP probes are disabled unless `mlp_probes=True` and PyTorch is installed.
 | --- | --- | --- |
 | `mlp_probes` | `False` | Enable conditional feed-forward probe evaluation. |
 | `mlp_device` | `"cpu"` | Select `"cpu"`, `"auto"`, `"cuda"`, or `"mps"`. |
-| `mlp_trigger_skill_threshold` | `0.75` | Run the optional probe only when simpler-family evidence meets the configured trigger. |
-| `mlp_min_improvement` | `0.02` | Require a minimum held-out gain before an MLP override. |
+| `mlp_trigger_skill_threshold` | `0.75` | Skip MLP computation when simpler-family skill already reaches this threshold; this value never gates an override. |
+| `mlp_min_improvement` | `0.02` | Require this paired held-out gain over both dummy and the strongest simpler probe before an override. |
 | `mlp_max_parameters` | `None` | Cap the MLP parameter count. |
 
-An MLP recommendation requires complete held-out evidence. Failed or infeasible
-group splits never fall back to in-sample override evidence.
+An MLP recommendation requires complete held-out evidence for dummy, linear,
+smooth nonlinear, kNN, and kernel-approximation comparators. The completed MLP
+must show paired signal above dummy and paired improvement over the strongest
+simpler probe on the required primary metrics. Failed or infeasible group splits
+never fall back to in-sample override evidence.
 
 ## Choosing a budget
 

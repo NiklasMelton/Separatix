@@ -117,9 +117,13 @@ pip install "separatix[mlp]"
 ```
 
 Set `mlp_probes=True` and use `mlp_device`, `mlp_trigger_skill_threshold`,
-`mlp_min_improvement`, and `mlp_max_parameters` to control them. An MLP can
-override simpler-family guidance only with complete held-out evidence; failed
-or infeasible group splits never fall back to in-sample override evidence.
+`mlp_min_improvement`, and `mlp_max_parameters` to control them. The skill
+threshold is only a compute gate: it determines whether MLP probes run and does
+not participate in a completed override decision. An MLP can override
+simpler-family guidance only with complete held-out evidence, paired signal
+above dummy, and a practical paired gain over the strongest simpler probe for
+the required primary metrics. Failed or infeasible group splits never fall back
+to in-sample override evidence.
 
 Optional persistent-topology diagnostics can be installed with:
 

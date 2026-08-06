@@ -97,9 +97,10 @@ class ComplexityProfiler:
         n_jobs: Optional parallel job count forwarded to supported estimators.
         mlp_probes: Enable conditional feed-forward MLP probes.
         mlp_device: Device policy for optional MLP probes.
-        mlp_trigger_skill_threshold: Minimum simpler-probe skill for the MLP
-            trigger policy.
-        mlp_min_improvement: Minimum held-out MLP gain required for an override.
+        mlp_trigger_skill_threshold: Minimum simpler-probe skill used only by the
+            MLP compute-trigger policy.
+        mlp_min_improvement: Minimum paired held-out MLP gain over dummy and the
+            strongest simpler probe required for an override.
         mlp_max_parameters: Optional hard MLP parameter cap.
 
     Attributes:

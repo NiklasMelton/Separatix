@@ -116,6 +116,15 @@ other ordinary probes as well. Each probe records the same
 - If all probes are only slightly better than the dummy or prevalence
   baseline, that suggests weak usable signal or a feature/label bottleneck.
 
+Optional MLP probes use two separate gates. The configured absolute-skill
+threshold is only a compute gate: an MLP is evaluated when the simpler probes
+do not already reach it. After evaluation, that threshold is ignored. An MLP
+override instead requires complete aligned held-out comparator evidence, a
+paired practical gain over the strongest simpler probe for each qualifying
+metric, and paired signal above dummy on the same metrics. Single-label needs
+balanced accuracy to qualify, multilabel needs at least two of its three primary
+metrics, and regression needs both primary R2 summaries.
+
 ### Neighborhood Diagnostics
 
 Neighborhood metrics estimate how mixed the labels are locally.

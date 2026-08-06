@@ -1077,8 +1077,9 @@ def make_recommendation(
             "families and satisfied the configured override criteria.",
         )
         decision_path.append(
-            "Conditional MLP probes were only run because simpler probes did not "
-            "meet the configured absolute-skill threshold."
+            "MLP computation was triggered because simpler probes did not meet "
+            "the configured absolute-skill trigger threshold; that threshold did "
+            "not participate in the override decision."
         )
         if mlp_payload.get("override_reason") is not None:
             decision_path.append(str(mlp_payload["override_reason"]))
@@ -1123,9 +1124,9 @@ def make_recommendation(
     if metrics.get("mlp_recommendation_evidence") is not None:
         interpretations["mlp_recommendation_evidence"] = (
             "Optional MLP probes run only after simpler models miss a configured "
-            "absolute-skill threshold, and they override the simpler-family "
-            "recommendation only when the best tested architecture clearly beats "
-            "every aligned simpler probe."
+            "absolute-skill trigger threshold. An override instead requires paired "
+            "signal above dummy and a practical paired improvement over the "
+            "strongest aligned simpler probe for the primary metric."
         )
 
     decision_path.append(
@@ -1670,8 +1671,9 @@ def make_multilabel_recommendation(
             "multilabel families and satisfied the configured override criteria.",
         )
         decision_path.append(
-            "Conditional MLP probes were only run because simpler multilabel "
-            "probes did not meet the configured absolute-skill threshold."
+            "MLP computation was triggered because simpler multilabel probes did "
+            "not meet the configured absolute-skill trigger threshold; that "
+            "threshold did not participate in the override decision."
         )
         if mlp_payload.get("override_reason") is not None:
             decision_path.append(str(mlp_payload["override_reason"]))
@@ -1716,9 +1718,10 @@ def make_multilabel_recommendation(
     if metrics.get("mlp_recommendation_evidence") is not None:
         interpretations["mlp_recommendation_evidence"] = (
             "Optional multilabel MLP probes run only after simpler models miss a "
-            "configured absolute-skill threshold, and they override simpler probe "
-            "families only when the best tested architecture clearly beats every "
-            "aligned simpler probe on at least two primary metrics."
+            "configured absolute-skill trigger threshold. An override instead "
+            "requires paired signal above dummy and practical paired improvement "
+            "over the strongest aligned simpler probe on at least two primary "
+            "metrics."
         )
     decision_path.append(
         "Signal metrics beating dummy: "
@@ -2204,8 +2207,9 @@ def make_regression_recommendation(
             "regression families and satisfied the configured override criteria.",
         )
         decision_path.append(
-            "Conditional MLP probes were only run because simpler regression "
-            "probes did not meet the configured absolute-skill threshold."
+            "MLP computation was triggered because simpler regression probes did "
+            "not meet the configured absolute-skill trigger threshold; that "
+            "threshold did not participate in the override decision."
         )
         if mlp_payload.get("override_reason") is not None:
             decision_path.append(str(mlp_payload["override_reason"]))
@@ -2274,9 +2278,10 @@ def make_regression_recommendation(
     if metrics.get("mlp_recommendation_evidence") is not None:
         interpretations["mlp_recommendation_evidence"] = (
             "Optional regression MLP probes run only after simpler models miss a "
-            "configured absolute-skill threshold, and they override simpler probe "
-            "families only when the best tested architecture clearly beats every "
-            "aligned simpler regressor on both primary R2 metrics."
+            "configured absolute-skill trigger threshold. An override instead "
+            "requires paired signal above dummy and practical paired improvement "
+            "over the strongest aligned simpler regressor on both primary R2 "
+            "metrics."
         )
     decision_path.append(
         "Signal metrics beating dummy: "
