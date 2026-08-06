@@ -42,6 +42,7 @@ from separatix.models.scoring import (
     summarize_regression_stability,
     summarize_stability,
 )
+from separatix.recipes import build_probe_recipe
 from separatix.sampling import (
     BudgetConfig,
     cap_multilabel_samples_for_budget,
@@ -64,6 +65,21 @@ _SMOOTH_PROBE_SKIP_REASON = (
     "quadratic expansion and low-rank sketch exceed configured memory budget"
 )
 
+_PROBE_FAMILIES = {
+    "dummy": "dummy",
+    "linear": "linear",
+    "knn": "local_kernel",
+    "smooth_poly": "smooth_nonlinear",
+    "kernel_approx": "local_kernel",
+}
+_PROBE_IMPLEMENTATION_SUFFIXES = {
+    "dummy": "dummy",
+    "linear": "linear",
+    "knn": "local",
+    "smooth_poly": "smooth_poly",
+    "kernel_approx": "local_kernel",
+}
+
 
 @dataclass
 class ProbeRunResult:
@@ -72,6 +88,101 @@ class ProbeRunResult:
     probes: dict[str, dict[str, Any]]
     evaluation: dict[str, Any]
     paired_comparisons: dict[str, Any]
+
+
+def _probe_input_contract(
+    X: Any,
+    *,
+    n_outputs: int,
+    sample_info: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe the representation and resolution used by one probe."""
+    return {
+        "representation": "sparse" if sparse.issparse(X) else "dense",
+        "n_features": int(X.shape[1]),
+        "n_outputs": int(n_outputs),
+        "resolution_n_samples": int(sample_info.get("n_used", X.shape[0])),
+    }
+
+
+def _probe_training_policy(
+    estimator: Any,
+    *,
+    config: ProfilerConfig,
+) -> dict[str, Any]:
+    """Describe deterministic settings and scoring-time estimator adjustments."""
+    adjustments: dict[str, Any] = {}
+    try:
+        params = estimator.get_params(deep=True)
+    except (AttributeError, TypeError, ValueError):
+        params = {}
+    for key, value in params.items():
+        if key == "n_neighbors" or key.endswith("__n_neighbors"):
+            try:
+                configured = int(value)
+            except (TypeError, ValueError):
+                continue
+            adjustments["knn_n_neighbors"] = {
+                "parameter": key,
+                "configured_n_neighbors": configured,
+                "rule": "max(1, min(configured_n_neighbors, fold_train_size))",
+                "source": "separatix.models.scoring._prepared_estimator",
+            }
+            break
+    return {
+        "evaluation_random_state": config.random_state,
+        "evaluation_deterministic": config.random_state is not None,
+        "scoring_time_estimator_adjustments": adjustments,
+    }
+
+
+def _attach_probe_recipe(
+    result: dict[str, Any],
+    estimator: Any,
+    *,
+    probe_name: str,
+    target_mode: str,
+    X: Any,
+    n_outputs: int,
+    sample_info: dict[str, Any],
+    config: ProfilerConfig,
+    variant: str | None = None,
+) -> dict[str, Any]:
+    """Attach a versioned recipe for one constructed core probe."""
+    family = _PROBE_FAMILIES[probe_name]
+    implementation_suffix = _PROBE_IMPLEMENTATION_SUFFIXES[probe_name]
+    result["probe_recipe"] = build_probe_recipe(
+        estimator,
+        probe_name=probe_name,
+        family=family,
+        target_mode=target_mode,
+        role="core_probe",
+        variant=variant,
+        input_contract=_probe_input_contract(
+            X,
+            n_outputs=n_outputs,
+            sample_info=sample_info,
+        ),
+        training_policy=_probe_training_policy(estimator, config=config),
+        implementation_key=f"separatix.probe.{target_mode}.{implementation_suffix}",
+        implementation_version=1,
+    )
+    result["probe_recipe_status"] = {"status": "available", "reason": None}
+    return result
+
+
+def _mark_unavailable_probe_recipe(
+    result: dict[str, Any],
+    reason: str | None,
+) -> dict[str, Any]:
+    """Mark a probe whose estimator was not constructed or could not run."""
+    stable_reason = str(reason) if reason else "estimator was not constructed"
+    result["probe_recipe"] = None
+    result["probe_recipe_status"] = {
+        "status": "unavailable",
+        "reason": stable_reason,
+    }
+    return result
 
 
 def _slice_rows(X: Any, indices: np.ndarray) -> Any:
@@ -141,6 +252,8 @@ def _unavailable_run(
     method: str,
 ) -> ProbeRunResult:
     """Return a probe run whose aligned held-out evaluation was unavailable."""
+    for probe in probes.values():
+        _mark_unavailable_probe_recipe(probe, probe.get("skipped_reason", reason))
     evaluation = {
         "alignment_status": "unavailable",
         "evaluation_plan_id": None,
@@ -591,6 +704,16 @@ def run_model_probes(
                 "evaluation_support": _classification_evaluation_support(y_used, cv),
             }
         )
+        _attach_probe_recipe(
+            metrics,
+            estimator,
+            probe_name=name,
+            target_mode="singlelabel",
+            X=X_used,
+            n_outputs=1,
+            sample_info=sample_info,
+            config=config,
+        )
         results[name] = metrics
 
     if dense_X is None:
@@ -600,6 +723,9 @@ def run_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
+        _mark_unavailable_probe_recipe(
+            results["smooth_poly"], dense_unavailable_reason
+        )
     else:
         dense_y = y_used
         dense_groups = groups_used
@@ -649,6 +775,17 @@ def run_model_probes(
                     ),
                 }
             )
+            _attach_probe_recipe(
+                metrics,
+                estimator,
+                probe_name="smooth_poly",
+                target_mode="singlelabel",
+                X=dense_X,
+                n_outputs=1,
+                sample_info=sample_info,
+                config=config,
+                variant=_FULL_QUADRATIC_VARIANT,
+            )
             results["smooth_poly"] = metrics
         else:
             sketch_components = _choose_sketch_components(
@@ -670,6 +807,9 @@ def run_model_probes(
                     "model_name": "PolynomialCountSketch+LogisticRegression",
                     "evaluation_plan_id": evaluation_plan_id,
                 }
+                _mark_unavailable_probe_recipe(
+                    results["smooth_poly"], _SMOOTH_PROBE_SKIP_REASON
+                )
             else:
                 estimator = _low_rank_quadratic_classifier(
                     sketch_components, config.random_state
@@ -714,6 +854,17 @@ def run_model_probes(
                         ),
                     }
                 )
+                _attach_probe_recipe(
+                    metrics,
+                    estimator,
+                    probe_name="smooth_poly",
+                    target_mode="singlelabel",
+                    X=dense_X,
+                    n_outputs=1,
+                    sample_info=sample_info,
+                    config=config,
+                    variant=_LOW_RANK_QUADRATIC_VARIANT,
+                )
                 results["smooth_poly"] = metrics
 
     if budget["run_kernel_probe"]:
@@ -724,6 +875,9 @@ def run_model_probes(
                 "sample_info": sample_info,
                 "evaluation_plan_id": evaluation_plan_id,
             }
+            _mark_unavailable_probe_recipe(
+                results["kernel_approx"], dense_unavailable_reason
+            )
         else:
             estimator = Pipeline(
                 [
@@ -783,6 +937,16 @@ def run_model_probes(
                     ),
                 }
             )
+            _attach_probe_recipe(
+                metrics,
+                estimator,
+                probe_name="kernel_approx",
+                target_mode="singlelabel",
+                X=dense_X,
+                n_outputs=1,
+                sample_info=sample_info,
+                config=config,
+            )
             results["kernel_approx"] = metrics
     else:
         results["kernel_approx"] = {
@@ -791,6 +955,9 @@ def run_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
+        _mark_unavailable_probe_recipe(
+            results["kernel_approx"], "kernel probe disabled for this budget"
+        )
     paired = build_paired_probe_comparisons(
         results,
         y_used,
@@ -859,7 +1026,7 @@ def _record_regression_probe(
 ) -> dict[str, object]:
     """Evaluate and summarize one regression probe."""
     if cv is None and groups is not None:
-        return {
+        result = {
             "skipped_reason": "group-disjoint supervised split unavailable",
             "model_name": model_name,
             "probe_name": name,
@@ -868,6 +1035,9 @@ def _record_regression_probe(
             "cv_method": cv_method,
             "evaluation_plan_id": evaluation_plan_id,
         }
+        return _mark_unavailable_probe_recipe(
+            result, "group-disjoint supervised split unavailable"
+        )
     start = time.perf_counter()
     preds, evaluation_mode = evaluate_regression_estimator(
         estimator,
@@ -903,6 +1073,17 @@ def _record_regression_probe(
     )
     if extra:
         metrics.update(extra)
+    _attach_probe_recipe(
+        metrics,
+        estimator,
+        probe_name=name,
+        target_mode="regression",
+        X=X,
+        n_outputs=Y.shape[1],
+        sample_info=sample_info,
+        config=config,
+        variant=(extra or {}).get("probe_variant"),
+    )
     return metrics
 
 
@@ -1045,6 +1226,9 @@ def run_regression_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
+        _mark_unavailable_probe_recipe(
+            results["smooth_poly"], dense_unavailable_reason
+        )
     else:
         dense_Y = Y_used
         dense_groups = groups_used
@@ -1095,6 +1279,9 @@ def run_regression_model_probes(
                     "model_name": "PolynomialCountSketch+Ridge",
                     "evaluation_plan_id": evaluation_plan_id,
                 }
+                _mark_unavailable_probe_recipe(
+                    results["smooth_poly"], _SMOOTH_PROBE_SKIP_REASON
+                )
             else:
                 estimator = _regression_smooth_estimator(
                     config, low_rank_components=sketch_components
@@ -1131,6 +1318,9 @@ def run_regression_model_probes(
                 "sample_info": sample_info,
                 "evaluation_plan_id": evaluation_plan_id,
             }
+            _mark_unavailable_probe_recipe(
+                results["kernel_approx"], dense_unavailable_reason
+            )
         else:
             estimator = Pipeline(
                 [
@@ -1169,6 +1359,9 @@ def run_regression_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
+        _mark_unavailable_probe_recipe(
+            results["kernel_approx"], "kernel probe disabled for this budget"
+        )
     paired = build_paired_probe_comparisons(
         results,
         Y_used,
@@ -1217,6 +1410,8 @@ def _evaluate_multilabel_probe(
     cv: Any | None,
     cv_method: str,
     evaluation_plan_id: str,
+    probe_name: str,
+    variant: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate one multilabel probe and return report metrics."""
     start = time.perf_counter()
@@ -1226,7 +1421,7 @@ def _evaluate_multilabel_probe(
             if groups is not None
             else "support-preserving supervised split unavailable"
         )
-        return {
+        result = {
             "skipped_reason": unavailable,
             "model_name": name,
             "sample_info": sample_info,
@@ -1234,6 +1429,7 @@ def _evaluate_multilabel_probe(
             "cv_stratification_method": cv_method,
             "evaluation_plan_id": evaluation_plan_id,
         }
+        return _mark_unavailable_probe_recipe(result, unavailable)
     preds, evaluation_mode = evaluate_multilabel_estimator(
         estimator,
         X,
@@ -1265,6 +1461,17 @@ def _evaluate_multilabel_probe(
             **_prediction_evidence(preds, config),
             "evaluation_support": _multilabel_evaluation_support(Y, cv),
         }
+    )
+    _attach_probe_recipe(
+        metrics,
+        estimator,
+        probe_name=probe_name,
+        target_mode="multilabel",
+        X=X,
+        n_outputs=_dense_multilabel_matrix(Y).shape[1],
+        sample_info=sample_info,
+        config=config,
+        variant=variant,
     )
     return metrics
 
@@ -1445,6 +1652,7 @@ def run_multilabel_model_probes(
             cv=cv,
             cv_method=cv_method,
             evaluation_plan_id=evaluation_plan_id,
+            probe_name=name,
         )
 
     if dense_X is None:
@@ -1454,6 +1662,9 @@ def run_multilabel_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
+        _mark_unavailable_probe_recipe(
+            results["smooth_poly"], dense_unavailable_reason
+        )
     else:
         dense_Y = Y_used
         dtype = dense_X.dtype if dense_X.dtype is not None else np.dtype(float)
@@ -1483,6 +1694,8 @@ def run_multilabel_model_probes(
                 cv=cv,
                 cv_method=cv_method,
                 evaluation_plan_id=evaluation_plan_id,
+                probe_name="smooth_poly",
+                variant=_FULL_QUADRATIC_VARIANT,
             )
             results["smooth_poly"].update(metadata)
             results["smooth_poly"]["probe_variant"] = _FULL_QUADRATIC_VARIANT
@@ -1506,6 +1719,9 @@ def run_multilabel_model_probes(
                     "model_name": "PolynomialCountSketch+OneVsRestLogisticRegression",
                     "evaluation_plan_id": evaluation_plan_id,
                 }
+                _mark_unavailable_probe_recipe(
+                    results["smooth_poly"], _SMOOTH_PROBE_SKIP_REASON
+                )
             else:
                 results["smooth_poly"] = _evaluate_multilabel_probe(
                     "PolynomialCountSketch+OneVsRestLogisticRegression",
@@ -1522,6 +1738,8 @@ def run_multilabel_model_probes(
                     cv=cv,
                     cv_method=cv_method,
                     evaluation_plan_id=evaluation_plan_id,
+                    probe_name="smooth_poly",
+                    variant=_LOW_RANK_QUADRATIC_VARIANT,
                 )
                 results["smooth_poly"].update(metadata)
                 results["smooth_poly"]["probe_variant"] = _LOW_RANK_QUADRATIC_VARIANT
@@ -1535,6 +1753,9 @@ def run_multilabel_model_probes(
                 "sample_info": sample_info,
                 "evaluation_plan_id": evaluation_plan_id,
             }
+            _mark_unavailable_probe_recipe(
+                results["kernel_approx"], dense_unavailable_reason
+            )
         else:
             estimator = Pipeline(
                 [
@@ -1576,6 +1797,7 @@ def run_multilabel_model_probes(
                 cv=cv,
                 cv_method=cv_method,
                 evaluation_plan_id=evaluation_plan_id,
+                probe_name="kernel_approx",
             )
     else:
         results["kernel_approx"] = {
@@ -1584,6 +1806,9 @@ def run_multilabel_model_probes(
             "sample_info": sample_info,
             "evaluation_plan_id": evaluation_plan_id,
         }
+        _mark_unavailable_probe_recipe(
+            results["kernel_approx"], "kernel probe disabled for this budget"
+        )
     paired = build_paired_probe_comparisons(
         results,
         y_dense,

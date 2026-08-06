@@ -11,3 +11,15 @@ class DensificationError(SeparatixError):
 
 class DensificationWarning(UserWarning):
     """Warning emitted when sparse data are densified or subsampled."""
+
+
+class ProbeRecipeError(SeparatixError):
+    """Base error for malformed or unsupported serialized probe recipes."""
+
+
+class UnsupportedProbeRecipeVersion(ProbeRecipeError):
+    """Raised when a recipe schema version is not supported by this package."""
+
+
+class ProbeRecipeCompatibilityError(ProbeRecipeError):
+    """Raised when a valid recipe is incompatible with the current runtime."""
