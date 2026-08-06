@@ -1865,9 +1865,7 @@ def compute_multilabel_scores(
     signal_available = len(signal_metrics) >= 2
     blocking = any(flag.get("severity") == "blocking" for flag in flags)
     candidate_family = _multilabel_candidate_family(comparisons)
-    recommended_family = (
-        candidate_family if signal_available and not blocking else None
-    )
+    recommended_family = candidate_family if signal_available and not blocking else None
     plausible_family_set = _multilabel_plausible_family_set(
         family_metrics,
         minimum_family=recommended_family,
@@ -2574,9 +2572,7 @@ def compute_regression_scores(
     signal_available = len(signal_metrics) >= 1
     blocking = any(flag.get("severity") == "blocking" for flag in flags)
     candidate_family = _regression_candidate_family(comparisons)
-    recommended_family = (
-        candidate_family if signal_available and not blocking else None
-    )
+    recommended_family = candidate_family if signal_available and not blocking else None
     plausible_family_set = _regression_plausible_family_set(
         family_metrics,
         minimum_family=recommended_family,

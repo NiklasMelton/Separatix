@@ -142,9 +142,7 @@ def test_multilabel_unresolved_minimum_returns_nondominated_families() -> None:
     }
 
     compute_multilabel_scores(metrics, skipped_count=0, warning_count=0)
-    family_set = metrics["multilabel_recommendation_evidence"][
-        "plausible_family_set"
-    ]
+    family_set = metrics["multilabel_recommendation_evidence"]["plausible_family_set"]
 
     assert family_set["status"] == "available"
     assert family_set["minimum_recommended_family"] is None
@@ -172,9 +170,7 @@ def test_multilabel_high_capacity_upgrade_stays_outside_core_family_set() -> Non
 
     scores = compute_multilabel_scores(metrics, skipped_count=0, warning_count=0)
     recommendation, _, _, _ = make_multilabel_recommendation(scores, metrics)
-    family_set = metrics["multilabel_recommendation_evidence"][
-        "plausible_family_set"
-    ]
+    family_set = metrics["multilabel_recommendation_evidence"]["plausible_family_set"]
 
     assert recommendation == HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
     assert family_set["plausible_families"] == ["local_kernel"]
@@ -197,9 +193,7 @@ def test_regression_frontier_uses_pareto_dominance() -> None:
     }
 
     compute_regression_scores(metrics, skipped_count=0, warning_count=0)
-    family_set = metrics["regression_recommendation_evidence"][
-        "plausible_family_set"
-    ]
+    family_set = metrics["regression_recommendation_evidence"]["plausible_family_set"]
 
     assert family_set["minimum_recommended_family"] == "smooth_nonlinear"
     assert family_set["plausible_families"] == [
@@ -221,9 +215,7 @@ def test_regression_blocking_evidence_makes_set_not_applicable() -> None:
     }
 
     compute_regression_scores(metrics, skipped_count=0, warning_count=0)
-    family_set = metrics["regression_recommendation_evidence"][
-        "plausible_family_set"
-    ]
+    family_set = metrics["regression_recommendation_evidence"]["plausible_family_set"]
 
     assert family_set["status"] == "not_applicable"
     assert family_set["plausible_families"] == []
@@ -243,9 +235,10 @@ def test_family_set_serializes_and_renders_in_default_text() -> None:
     payload = json.loads(report.to_json())
 
     assert family_set["status"] == "available"
-    assert payload["metrics"]["recommendation_evidence"][
-        "plausible_family_set"
-    ] == family_set
+    assert (
+        payload["metrics"]["recommendation_evidence"]["plausible_family_set"]
+        == family_set
+    )
     assert "Minimum recommended core family:" in report.recommendation_text
     assert "Statistically plausible core families:" in report.recommendation_text
     assert family_set["decision_method"] == "paired_oof_bootstrap"
