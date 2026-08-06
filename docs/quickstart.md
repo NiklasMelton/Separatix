@@ -43,6 +43,27 @@ The default serialized representation is terse and removes large row-level
 arrays. Use `report.to_dict(terse=False)` or `report.to_json(terse=False)` only
 when those detailed arrays are required.
 
+The target-specific recommendation evidence exposes both the conservative
+minimum family and the broader competitive frontier. For a single-label run:
+
+```python
+family_set = report.metrics["recommendation_evidence"]["plausible_family_set"]
+print(family_set["minimum_recommended_family"])
+print(family_set["plausible_families"])
+```
+
+Constructed probe entries also contain versioned estimator recipes. The public
+factory reconstructs a fresh unfitted estimator for an audit; see
+[Reading a diagnostic report](reports.md#reconstructing-an-audited-probe) for
+the reproducibility boundaries.
+
+```python
+from separatix import make_probe_estimator
+
+recipe = report.metrics["probes"]["linear"]["probe_recipe"]
+estimator = make_probe_estimator(recipe)
+```
+
 ## Estimator-style use
 
 Use {class}`~separatix.ComplexityProfiler` when configuration should be reused
