@@ -84,6 +84,24 @@ Non-finite diagnostic values are represented as JSON `null`; `to_json()` never
 emits non-standard `NaN` or infinity literals. The default terse form removes
 large row-level arrays before copying them.
 
+Constructed probe entries also include a compact, versioned `probe_recipe` for
+auditing. It records the resolved estimator graph, preprocessing,
+hyperparameters, training policy, and dynamically detected Python and library
+versions. Reconstruct the corresponding unfitted estimator through the safe
+public factory:
+
+```python
+from separatix import make_probe_estimator
+
+recipe = report.metrics["probes"]["linear"]["probe_recipe"]
+estimator = make_probe_estimator(recipe)
+```
+
+The factory only accepts known Separatix probe components; serialized recipes
+cannot request arbitrary imports. Skipped probes report why a recipe is
+unavailable instead of implying that an unconstructed estimator can be
+reproduced.
+
 For multilabel targets, `separatix` compares probe families across micro F1,
 macro F1, and sample Jaccard rather than collapsing the evidence into a single
 weighted score. Optional iterative multilabel stratification can be installed

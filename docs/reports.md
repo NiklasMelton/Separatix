@@ -92,3 +92,35 @@ full_json = report.to_json(indent=2, terse=False)
 The terse form is the recommended storage format. It prunes large row-level
 arrays before copying them. Non-finite values are serialized as JSON `null`, so
 the JSON output never contains non-standard `NaN` or infinity literals.
+
+## Reconstructing an audited probe
+
+Constructed probe results include a versioned `probe_recipe` and a
+`probe_recipe_status`. Recipes record the resolved preprocessing and estimator
+graph, hyperparameters, data-dependent dimensions, training policy, and the
+runtime environment that created them. Environment versions are populated from
+the installed runtime rather than copied from static package metadata.
+
+```python
+from separatix import make_probe_estimator
+
+recipe = report.metrics["probes"]["linear"]["probe_recipe"]
+estimator = make_probe_estimator(recipe)
+estimator.fit(X_train, y_train)
+```
+
+The factory uses a fixed allowlist of Separatix probe components and returns an
+unfitted estimator. It never imports an arbitrary class named by serialized
+input. Its `version_policy` argument controls whether differences between the
+recorded and current Python/library environments warn, raise an error, or are
+ignored:
+
+```python
+estimator = make_probe_estimator(recipe, version_policy="error")
+```
+
+A recipe describes the exact estimator construction and fit policy used by the
+diagnostic. It intentionally does not contain fitted coefficients, validation
+rows, or a claim of bit-for-bit reproducibility across library versions.
+Skipped probes expose an unavailable recipe status and a reason rather than a
+recipe for an estimator that was never constructed.

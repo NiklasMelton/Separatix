@@ -27,3 +27,11 @@ Report object
 
 .. autoclass:: separatix.DiagnosticReport
    :members: to_dict, to_json
+
+Probe recipes and audit factory
+-------------------------------
+
+.. autoclass:: separatix.ProbeRecipe
+   :members: from_dict, to_dict
+
+.. autofunction:: separatix.make_probe_estimator

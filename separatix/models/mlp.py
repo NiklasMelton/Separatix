@@ -8,6 +8,7 @@ import importlib
 import math
 import time
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import replace
 from importlib.util import find_spec
 from typing import Any, Literal, cast
@@ -53,6 +54,7 @@ from separatix.models.scoring import (
     summarize_predictions,
     summarize_regression_predictions,
 )
+from separatix.recipes import build_probe_recipe
 from separatix.sampling import (
     cap_multilabel_samples_for_budget,
     cap_regression_samples_for_budget,
@@ -104,6 +106,66 @@ _REQUIRED_MLP_COMPARATORS = (
     "kernel_approx",
 )
 _SIMPLER_MLP_COMPARATORS = _REQUIRED_MLP_COMPARATORS[1:]
+
+# Keep every Torch training choice in one JSON-compatible policy.  The policy
+# is copied per estimator below, then used by ``_TorchMLPBase.fit`` and passed
+# to ``build_probe_recipe``.  This prevents an audited recipe from drifting
+# away from the training implementation when a default changes.
+_MLP_TRAINING_POLICY: dict[str, Any] = {
+    "optimizer": {
+        "name": "AdamW",
+        "learning_rate": 1e-3,
+        "betas": [0.9, 0.95],
+        "weight_decay": 1e-4,
+    },
+    "schedule": {
+        "name": "warmup_cosine",
+        "warmup_epochs": 5,
+        "warmup_start_factor": 0.2,
+        "cosine_min_factor": 0.0,
+    },
+    "initialization": {
+        "hidden": {"method": "kaiming_normal", "nonlinearity": "relu"},
+        "output": {"method": "xavier_uniform"},
+        "bias": {"method": "zeros"},
+    },
+    "early_stopping": {
+        "monitor": "validation_loss",
+        "min_delta": 1e-6,
+        "restore_best": True,
+    },
+    "gradient_clip": {"method": "clip_grad_norm", "max_norm": 5.0},
+    "loss": {
+        "singlelabel": {
+            "name": "CrossEntropyLoss",
+            "class_weight": "inverse_frequency_balanced",
+        },
+        "multilabel": {
+            "name": "BCEWithLogitsLoss",
+            "positive_weight": "negative_over_positive",
+            "positive_weight_clip": [0.05, 20.0],
+        },
+        "regression": {"name": "MSELoss"},
+    },
+}
+
+
+def _mlp_training_policy(estimator: Any) -> dict[str, Any]:
+    """Return the resolved JSON-compatible Torch policy for one estimator."""
+    policy = deepcopy(_MLP_TRAINING_POLICY)
+    policy["fit"] = {
+        "epochs": int(estimator.epochs),
+        "patience": int(estimator.patience),
+        "batch_size": int(estimator.batch_size),
+        "device": str(estimator.device),
+        "random_state": (
+            None if estimator.random_state is None else int(estimator.random_state)
+        ),
+    }
+    # Explicitly state the task so a recipe remains self-describing even when
+    # a consumer only inspects its training policy.
+    policy["task"] = str(estimator.task)
+    return policy
 
 
 def _torch_module() -> Any | None:
@@ -173,6 +235,118 @@ def _mlp_budget(config: ProfilerConfig) -> dict[str, int]:
     if config.mlp_max_parameters is not None:
         budget["max_parameters"] = int(config.mlp_max_parameters)
     return budget
+
+
+_MLP_COMPARATOR_FAMILIES = {
+    "dummy": "dummy",
+    "linear": "linear",
+    "smooth_poly": "smooth_nonlinear",
+    "knn": "local_kernel",
+    "kernel_approx": "local_kernel",
+}
+_MLP_COMPARATOR_IMPLEMENTATION_SUFFIXES = {
+    "dummy": "dummy",
+    "linear": "linear",
+    "smooth_poly": "smooth_poly",
+    "knn": "knn",
+    "kernel_approx": "kernel_approx",
+}
+
+
+def _probe_input_contract(
+    X: np.ndarray,
+    *,
+    n_outputs: int,
+    sample_info: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe the dense representation and resolution used by an MLP probe."""
+    resolution_n_samples = sample_info.get("n_used")
+    if resolution_n_samples is None:
+        resolution_n_samples = X.shape[0]
+    return {
+        "representation": "dense",
+        "n_features": int(X.shape[1]),
+        "n_outputs": int(n_outputs),
+        "resolution_n_samples": int(resolution_n_samples),
+    }
+
+
+def _comparator_training_policy(
+    estimator: Any, config: ProfilerConfig
+) -> dict[str, Any]:
+    """Describe deterministic settings and scoring-time comparator adjustments."""
+    adjustments: dict[str, Any] = {}
+    try:
+        params = estimator.get_params(deep=True)
+    except (AttributeError, TypeError, ValueError):
+        params = {}
+    for key, value in params.items():
+        if key == "n_neighbors" or key.endswith("__n_neighbors"):
+            try:
+                configured = int(value)
+            except (TypeError, ValueError):
+                continue
+            adjustments["knn_n_neighbors"] = {
+                "parameter": key,
+                "configured_n_neighbors": configured,
+                "rule": "max(1, min(configured_n_neighbors, fold_train_size))",
+                "source": "separatix.models.scoring._prepared_estimator",
+            }
+            break
+    return {
+        "evaluation_random_state": config.random_state,
+        "evaluation_deterministic": config.random_state is not None,
+        "scoring_time_estimator_adjustments": adjustments,
+    }
+
+
+def _attach_mlp_probe_recipe(
+    result: dict[str, Any],
+    estimator: Any,
+    *,
+    probe_name: str,
+    target_mode: Literal["singlelabel", "multilabel", "regression"],
+    family: str,
+    role: str,
+    X: np.ndarray,
+    n_outputs: int,
+    sample_info: dict[str, Any],
+    config: ProfilerConfig,
+    variant: str | None = None,
+    training_policy: dict[str, Any] | None = None,
+    implementation_key: str | None = None,
+) -> dict[str, Any]:
+    """Attach a recipe and available status to one constructed estimator result."""
+    result["probe_recipe"] = build_probe_recipe(
+        estimator,
+        probe_name=probe_name,
+        family=family,
+        target_mode=target_mode,
+        role=role,
+        variant=variant,
+        input_contract=_probe_input_contract(
+            X,
+            n_outputs=n_outputs,
+            sample_info=sample_info,
+        ),
+        training_policy=training_policy,
+        implementation_key=implementation_key,
+        implementation_version=1,
+    )
+    result["probe_recipe_status"] = {"status": "available", "reason": None}
+    return result
+
+
+def _mark_mlp_recipe_unavailable(
+    result: dict[str, Any], reason: str | None = None
+) -> dict[str, Any]:
+    """Mark an unconstructed or skipped MLP result without inventing a recipe."""
+    result["probe_recipe"] = None
+    result["probe_recipe_status"] = {
+        "status": "unavailable",
+        "reason": str(reason) if reason else "estimator was not constructed",
+    }
+    return result
 
 
 def _skill_from_bounds(
@@ -709,16 +883,44 @@ class _TorchMLPBase(BaseEstimator):
         self.random_state = random_state
         self.multilabel_stratification = multilabel_stratification
 
-    def _init_model(self, torch: Any, input_dim: int, output_dim: int) -> Any:
+    def _init_model(
+        self,
+        torch: Any,
+        input_dim: int,
+        output_dim: int,
+        *,
+        policy: dict[str, Any],
+    ) -> Any:
         """Initialize the torch module and apply explicit weight initialization."""
         modules: list[Any] = []
         layer_dims = [input_dim, *self.hidden_layer_sizes, output_dim]
+        initialization = policy["initialization"]
         for index in range(len(layer_dims) - 1):
             linear = torch.nn.Linear(layer_dims[index], layer_dims[index + 1])
             if index < len(layer_dims) - 2:
-                torch.nn.init.kaiming_normal_(linear.weight, nonlinearity="relu")
+                hidden_init = initialization["hidden"]
+                if hidden_init["method"] != "kaiming_normal":
+                    raise ValueError(
+                        "Unsupported hidden MLP initialization method: "
+                        f"{hidden_init['method']}"
+                    )
+                torch.nn.init.kaiming_normal_(
+                    linear.weight,
+                    nonlinearity=str(hidden_init["nonlinearity"]),
+                )
             else:
+                output_init = initialization["output"]
+                if output_init["method"] != "xavier_uniform":
+                    raise ValueError(
+                        "Unsupported output MLP initialization method: "
+                        f"{output_init['method']}"
+                    )
                 torch.nn.init.xavier_uniform_(linear.weight)
+            bias_init = initialization["bias"]
+            if bias_init["method"] != "zeros":
+                raise ValueError(
+                    f"Unsupported MLP bias initialization method: {bias_init['method']}"
+                )
             torch.nn.init.zeros_(linear.bias)
             modules.append(linear)
             if index < len(layer_dims) - 2:
@@ -741,6 +943,8 @@ class _TorchMLPBase(BaseEstimator):
         torch = _torch_module()
         if torch is None:
             raise RuntimeError("torch is required for MLP probes but is not installed.")
+        policy = _mlp_training_policy(self)
+        self.training_policy_ = deepcopy(policy)
         seed = int(self.random_state) if self.random_state is not None else 0
         X_array = np.asarray(X, dtype=np.float32)
         if self.task == "singlelabel":
@@ -799,25 +1003,36 @@ class _TorchMLPBase(BaseEstimator):
         # initialization. Batch ordering uses a dedicated CPU generator below.
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(seed)
-            model = self._init_model(torch, X_array.shape[1], output_dim).to(
-                self.device
-            )
+            model = self._init_model(
+                torch,
+                X_array.shape[1],
+                output_dim,
+                policy=policy,
+            ).to(self.device)
         batch_generator = torch.Generator(device="cpu")
         batch_generator.manual_seed(seed)
+        optimizer_policy = policy["optimizer"]
         optimizer = torch.optim.AdamW(
             model.parameters(),
-            lr=1e-3,
-            betas=(0.9, 0.95),
-            weight_decay=1e-4,
+            lr=float(optimizer_policy["learning_rate"]),
+            betas=tuple(float(value) for value in optimizer_policy["betas"]),
+            weight_decay=float(optimizer_policy["weight_decay"]),
         )
 
         def schedule(epoch: int) -> float:
-            if epoch < 5:
-                return float(epoch + 1) / 5.0
-            progress = (epoch - 5) / max(1, self.epochs - 5)
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
+            schedule_policy = policy["schedule"]
+            warmup_epochs = int(schedule_policy["warmup_epochs"])
+            if epoch < warmup_epochs:
+                start_factor = float(schedule_policy["warmup_start_factor"])
+                progress = float(epoch + 1) / max(1, warmup_epochs)
+                return start_factor + (1.0 - start_factor) * progress
+            progress = (epoch - warmup_epochs) / max(1, self.epochs - warmup_epochs)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            minimum = float(schedule_policy["cosine_min_factor"])
+            return minimum + (1.0 - minimum) * cosine
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=schedule)
+        loss_policy = policy["loss"][self.task]
         if self.task == "singlelabel":
             counts = np.bincount(y_fit.astype(np.int64))
             weights = np.sum(counts) / np.maximum(counts.shape[0] * counts, 1)
@@ -827,7 +1042,14 @@ class _TorchMLPBase(BaseEstimator):
         elif self.task == "multilabel":
             positive = np.sum(y_fit, axis=0)
             negative = y_fit.shape[0] - positive
-            pos_weight = np.clip(negative / np.maximum(positive, 1.0), 0.05, 20.0)
+            positive_weight_clip = tuple(
+                float(value) for value in loss_policy["positive_weight_clip"]
+            )
+            pos_weight = np.clip(
+                negative / np.maximum(positive, 1.0),
+                positive_weight_clip[0],
+                positive_weight_clip[1],
+            )
             loss_fn = torch.nn.BCEWithLogitsLoss(
                 pos_weight=torch.tensor(
                     pos_weight, dtype=torch.float32, device=self.device
@@ -852,6 +1074,8 @@ class _TorchMLPBase(BaseEstimator):
         bad_epochs = 0
         epochs_trained = 0
         batch_size = max(1, min(self.batch_size, X_fit.shape[0]))
+        clip_policy = policy["gradient_clip"]
+        early_stopping_policy = policy["early_stopping"]
         for epoch in range(self.epochs):
             model.train()
             permutation = torch.randperm(
@@ -864,7 +1088,9 @@ class _TorchMLPBase(BaseEstimator):
                     logits = model(X_fit_tensor[batch])
                     loss = loss_fn(logits, y_fit_tensor[batch])
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=float(clip_policy["max_norm"])
+                    )
                     optimizer.step()
             except RuntimeError as exc:
                 if "out of memory" not in str(exc).lower() or batch_size <= 8:
@@ -882,7 +1108,7 @@ class _TorchMLPBase(BaseEstimator):
                 valid_loss = float(
                     loss_fn(model(X_valid_tensor), y_valid_tensor).item()
                 )
-            if valid_loss + 1e-6 < best_loss:
+            if valid_loss + float(early_stopping_policy["min_delta"]) < best_loss:
                 best_loss = valid_loss
                 best_state = {
                     name: tensor.detach().cpu().clone()
@@ -891,9 +1117,9 @@ class _TorchMLPBase(BaseEstimator):
                 bad_epochs = 0
             else:
                 bad_epochs += 1
-                if bad_epochs >= self.patience:
+                if bad_epochs >= int(policy["fit"]["patience"]):
                     break
-        if best_state is not None:
+        if best_state is not None and bool(early_stopping_policy["restore_best"]):
             model.load_state_dict(best_state)
         self.model_ = model
         self.training_summary_ = {
@@ -1119,6 +1345,89 @@ def _safe_evaluate_models(
                 "error": message,
                 "evaluation_mode": kwargs.get("evaluation_mode"),
             }
+    return results
+
+
+def _attach_aligned_comparator_recipes(
+    results: dict[str, dict[str, Any]],
+    estimators: dict[str, Any],
+    *,
+    target_mode: Literal["singlelabel", "multilabel", "regression"],
+    X: np.ndarray,
+    n_outputs: int,
+    sample_info: dict[str, Any],
+    config: ProfilerConfig,
+    variants: dict[str, str | None] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Attach recipes to constructed aligned comparator results.
+
+    A comparator omitted by a memory or budget gate is represented explicitly
+    with an unavailable recipe status.  This keeps the aligned result schema
+    auditable without fabricating an estimator that was never constructed.
+    """
+    variants = variants or {}
+    for name, estimator in estimators.items():
+        result = results.setdefault(name, {})
+        family = _MLP_COMPARATOR_FAMILIES[name]
+        implementation_suffix = _MLP_COMPARATOR_IMPLEMENTATION_SUFFIXES[name]
+        _attach_mlp_probe_recipe(
+            result,
+            estimator,
+            probe_name=name,
+            family=family,
+            target_mode=target_mode,
+            role="mlp_aligned_comparator",
+            X=X,
+            n_outputs=n_outputs,
+            sample_info=sample_info,
+            config=config,
+            variant=variants.get(name),
+            training_policy=_comparator_training_policy(estimator, config),
+            implementation_key=(
+                f"separatix.probe.{target_mode}.mlp_comparator.{implementation_suffix}"
+            ),
+        )
+    for name in _REQUIRED_MLP_COMPARATORS:
+        if name not in results:
+            result = results.setdefault(name, {})
+            _mark_mlp_recipe_unavailable(result, "estimator was not constructed")
+            result["status"] = "skipped"
+    return results
+
+
+def _attach_architecture_recipes(
+    results: dict[str, dict[str, Any]],
+    estimators: dict[str, Any],
+    *,
+    target_mode: Literal["singlelabel", "multilabel", "regression"],
+    X: np.ndarray,
+    n_outputs: int,
+    sample_info: dict[str, Any],
+    config: ProfilerConfig,
+    variants: dict[str, str | None] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Attach exact recipes to each constructed MLP architecture result."""
+    variants = variants or {}
+    for name, estimator in estimators.items():
+        result = results.setdefault(name, {})
+        architecture_name = name.removeprefix("mlp_")
+        _attach_mlp_probe_recipe(
+            result,
+            estimator,
+            probe_name=name,
+            family="mlp",
+            target_mode=target_mode,
+            role="mlp_architecture",
+            X=X,
+            n_outputs=n_outputs,
+            sample_info=sample_info,
+            config=config,
+            variant=variants.get(name, architecture_name),
+            training_policy=_mlp_training_policy(estimator),
+            implementation_key=(
+                f"separatix.probe.{target_mode}.mlp.{architecture_name}"
+            ),
+        )
     return results
 
 
@@ -1475,6 +1784,11 @@ def _singlelabel_override_evidence(
         "best_architecture": {
             "probe_name": best_name,
             "balanced_accuracy": float(best_result["balanced_accuracy"]),
+            "probe_recipe_id": (
+                best_result.get("probe_recipe", {}).get("recipe_id")
+                if isinstance(best_result.get("probe_recipe"), dict)
+                else None
+            ),
         },
         "required_comparators_complete": required_complete,
         "architectures_complete": True,
@@ -1628,6 +1942,11 @@ def _multilabel_override_evidence(
             "micro_f1": float(best_result["micro_f1"]),
             "macro_f1": float(best_result["macro_f1"]),
             "sample_jaccard": float(best_result["sample_jaccard"]),
+            "probe_recipe_id": (
+                best_result.get("probe_recipe", {}).get("recipe_id")
+                if isinstance(best_result.get("probe_recipe"), dict)
+                else None
+            ),
         },
         "required_comparators_complete": required_complete,
         "architectures_complete": True,
@@ -1779,6 +2098,11 @@ def _regression_override_evidence(
             "probe_name": best_name,
             "r2_variance_weighted": float(best_result["r2_variance_weighted"]),
             "r2_uniform_average": float(best_result["r2_uniform_average"]),
+            "probe_recipe_id": (
+                best_result.get("probe_recipe", {}).get("recipe_id")
+                if isinstance(best_result.get("probe_recipe"), dict)
+                else None
+            ),
         },
         "required_comparators_complete": required_complete,
         "architectures_complete": True,
@@ -1989,12 +2313,14 @@ def maybe_run_singlelabel_mlp_probes(
             name="knn",
         ),
     }
+    comparator_variants: dict[str, str | None] = {}
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
     estimated_expanded_mb = _estimate_dense_mb(
         dense_X.shape[0], expanded_features, dense_X.dtype
     )
     if expanded_features <= 50_000 and estimated_expanded_mb <= config.max_dense_mb:
         comparators["smooth_poly"] = _full_quadratic_classifier(config.random_state)
+        comparator_variants["smooth_poly"] = "full_quadratic"
     else:
         sketch = _choose_sketch_components(
             dense_X.shape[0],
@@ -2007,6 +2333,7 @@ def maybe_run_singlelabel_mlp_probes(
                 sketch,
                 config.random_state,
             )
+            comparator_variants["smooth_poly"] = "low_rank_quadratic"
     comparators["kernel_approx"] = Pipeline(
         [
             ("scale_in", StandardScaler()),
@@ -2067,6 +2394,25 @@ def maybe_run_singlelabel_mlp_probes(
         evaluation_mode=evaluation_mode,
         groups=dense_groups,
     )
+    comparator_results = _attach_aligned_comparator_recipes(
+        comparator_results,
+        comparators,
+        target_mode="singlelabel",
+        X=dense_X,
+        n_outputs=1,
+        sample_info=sample_info,
+        config=config,
+        variants=comparator_variants,
+    )
+    mlp_results = _attach_architecture_recipes(
+        mlp_results,
+        mlp_estimators,
+        target_mode="singlelabel",
+        X=dense_X,
+        n_outputs=1,
+        sample_info=sample_info,
+        config=config,
+    )
     recommendation = _singlelabel_override_evidence(
         mlp_results,
         comparator_results,
@@ -2087,7 +2433,15 @@ def maybe_run_singlelabel_mlp_probes(
             "reason": recommendation["override_reason"],
             "sample_info": sample_info,
             "architectures": [
-                {**item, **mlp_results.get(f"mlp_{item['label']}", {})}
+                {
+                    **item,
+                    **mlp_results.get(
+                        f"mlp_{item['label']}",
+                        _mark_mlp_recipe_unavailable(
+                            {}, "estimator was not constructed"
+                        ),
+                    ),
+                }
                 for item in architectures
             ],
             "aligned_comparators": comparator_results,
@@ -2269,12 +2623,14 @@ def maybe_run_multilabel_mlp_probes(
             name="knn",
         ),
     }
+    comparator_variants: dict[str, str | None] = {}
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
     estimated_expanded_mb = _estimate_dense_mb(
         dense_X.shape[0], expanded_features, dense_X.dtype
     )
     if expanded_features <= 50_000 and estimated_expanded_mb <= config.max_dense_mb:
         comparators["smooth_poly"] = _full_multilabel_quadratic_classifier(config)
+        comparator_variants["smooth_poly"] = "full_quadratic"
     else:
         sketch = _choose_sketch_components(
             dense_X.shape[0],
@@ -2287,6 +2643,7 @@ def maybe_run_multilabel_mlp_probes(
                 sketch,
                 config,
             )
+            comparator_variants["smooth_poly"] = "low_rank_quadratic"
     comparators["kernel_approx"] = Pipeline(
         [
             ("scale_in", StandardScaler()),
@@ -2350,6 +2707,25 @@ def maybe_run_multilabel_mlp_probes(
         evaluation_mode=evaluation_mode,
         groups=dense_groups,
     )
+    comparator_results = _attach_aligned_comparator_recipes(
+        comparator_results,
+        comparators,
+        target_mode="multilabel",
+        X=dense_X,
+        n_outputs=dense_Y.shape[1],
+        sample_info=sample_info,
+        config=config,
+        variants=comparator_variants,
+    )
+    mlp_results = _attach_architecture_recipes(
+        mlp_results,
+        mlp_estimators,
+        target_mode="multilabel",
+        X=dense_X,
+        n_outputs=dense_Y.shape[1],
+        sample_info=sample_info,
+        config=config,
+    )
     recommendation = _multilabel_override_evidence(
         mlp_results,
         comparator_results,
@@ -2371,7 +2747,15 @@ def maybe_run_multilabel_mlp_probes(
             "reason": recommendation["override_reason"],
             "sample_info": sample_info,
             "architectures": [
-                {**item, **mlp_results.get(f"mlp_{item['label']}", {})}
+                {
+                    **item,
+                    **mlp_results.get(
+                        f"mlp_{item['label']}",
+                        _mark_mlp_recipe_unavailable(
+                            {}, "estimator was not constructed"
+                        ),
+                    ),
+                }
                 for item in architectures
             ],
             "aligned_comparators": comparator_results,
@@ -2543,12 +2927,14 @@ def maybe_run_regression_mlp_probes(
             name="knn",
         ),
     }
+    comparator_variants: dict[str, str | None] = {}
     expanded_features = _quadratic_feature_count(dense_X.shape[1])
     estimated_expanded_mb = _estimate_dense_mb(
         dense_X.shape[0], expanded_features, dense_X.dtype
     )
     if expanded_features <= 50_000 and estimated_expanded_mb <= config.max_dense_mb:
         comparators["smooth_poly"] = _regression_smooth_estimator(config)
+        comparator_variants["smooth_poly"] = "full_quadratic"
     else:
         sketch = _choose_sketch_components(
             dense_X.shape[0],
@@ -2561,6 +2947,7 @@ def maybe_run_regression_mlp_probes(
                 config,
                 low_rank_components=sketch,
             )
+            comparator_variants["smooth_poly"] = "low_rank_quadratic"
     comparators["kernel_approx"] = Pipeline(
         [
             ("scale_in", StandardScaler()),
@@ -2612,6 +2999,25 @@ def maybe_run_regression_mlp_probes(
         evaluation_mode=evaluation_mode,
         groups=dense_groups,
     )
+    comparator_results = _attach_aligned_comparator_recipes(
+        comparator_results,
+        comparators,
+        target_mode="regression",
+        X=dense_X,
+        n_outputs=dense_Y.shape[1],
+        sample_info=sample_info,
+        config=config,
+        variants=comparator_variants,
+    )
+    mlp_results = _attach_architecture_recipes(
+        mlp_results,
+        mlp_estimators,
+        target_mode="regression",
+        X=dense_X,
+        n_outputs=dense_Y.shape[1],
+        sample_info=sample_info,
+        config=config,
+    )
     recommendation = _regression_override_evidence(
         mlp_results,
         comparator_results,
@@ -2633,7 +3039,15 @@ def maybe_run_regression_mlp_probes(
             "reason": recommendation["override_reason"],
             "sample_info": sample_info,
             "architectures": [
-                {**item, **mlp_results.get(f"mlp_{item['label']}", {})}
+                {
+                    **item,
+                    **mlp_results.get(
+                        f"mlp_{item['label']}",
+                        _mark_mlp_recipe_unavailable(
+                            {}, "estimator was not constructed"
+                        ),
+                    ),
+                }
                 for item in architectures
             ],
             "aligned_comparators": comparator_results,
