@@ -86,6 +86,49 @@ _SUGGESTIONS = {
     ],
 }
 
+_CORE_FAMILY_DISPLAY_NAMES = {
+    "linear": "linear",
+    "smooth_nonlinear": "smooth nonlinear",
+    "local_kernel": "local/kernel",
+}
+
+
+def _render_plausible_family_set(report: DiagnosticReport) -> str:
+    """Render the target-specific plausible core-family evidence when useful."""
+    target_type = report.class_summary.get("target_type")
+    if target_type == "multilabel":
+        evidence_key = "multilabel_recommendation_evidence"
+    elif target_type == "regression":
+        evidence_key = "regression_recommendation_evidence"
+    else:
+        evidence_key = "recommendation_evidence"
+    payload = report.metrics.get(evidence_key, {}).get("plausible_family_set", {})
+    status = payload.get("status")
+    if status == "not_applicable" or not status:
+        return ""
+    if status == "unavailable":
+        reason = payload.get("reason") or "required probe comparisons were unavailable"
+        return f"Plausible core-family set unavailable: {reason}\n\n"
+
+    minimum = payload.get("minimum_recommended_family")
+    plausible = [
+        _CORE_FAMILY_DISPLAY_NAMES.get(family, family)
+        for family in payload.get("plausible_families", [])
+    ]
+    plausible_text = ", ".join(plausible) if plausible else "none"
+    if minimum is None:
+        return (
+            "Minimum recommended core family: unresolved across primary metrics.\n"
+            "Statistically plausible core families (nondominated): "
+            f"{plausible_text}.\n\n"
+        )
+    minimum_name = str(minimum)
+    minimum_text = _CORE_FAMILY_DISPLAY_NAMES.get(minimum_name, minimum_name)
+    return (
+        f"Minimum recommended core family: {minimum_text}.\n"
+        f"Statistically plausible core families: {plausible_text}.\n\n"
+    )
+
 
 def _render_multilabel_recommendation(report: DiagnosticReport) -> str:
     """Render a concise plain-text multilabel recommendation."""
@@ -101,9 +144,11 @@ def _render_multilabel_recommendation(report: DiagnosticReport) -> str:
         if report.grouping.get("provided")
         else ""
     )
+    family_set_text = _render_plausible_family_set(report)
     return (
         f"Recommendation: {headline}\n\n"
         f"{' '.join(report.decision_path[:3])}\n\n"
+        f"{family_set_text}"
         f"{grouping_note}"
         "This is a multilabel diagnostic. Evidence is compared across micro F1, "
         "macro F1, and sample Jaccard rather than collapsed into one weighted "
@@ -132,9 +177,11 @@ def render_recommendation(report: DiagnosticReport) -> str:
         if report.grouping.get("provided")
         else ""
     )
+    family_set_text = _render_plausible_family_set(report)
     return (
         f"Recommendation: {headline}\n\n"
         f"{' '.join(report.decision_path[:3])}\n\n"
+        f"{family_set_text}"
         f"{grouping_note}"
         f"Suggested next models:\n{suggestion_text}\n\n"
         f"Confidence: {report.confidence}.\n"
@@ -156,9 +203,11 @@ def _render_regression_recommendation(report: DiagnosticReport) -> str:
         if report.grouping.get("provided")
         else ""
     )
+    family_set_text = _render_plausible_family_set(report)
     return (
         f"Recommendation: {headline}\n\n"
         f"{' '.join(report.decision_path[:3])}\n\n"
+        f"{family_set_text}"
         f"{grouping_note}"
         "This is an explicit regression diagnostic. Evidence is compared across "
         "variance-weighted and uniform-average R2, with normalized RMSE and "
