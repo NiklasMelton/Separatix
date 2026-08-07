@@ -5,14 +5,12 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterator
 from itertools import combinations
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 
 from separatix.models.scoring import (
-    summarize_multilabel_predictions,
-    summarize_predictions,
-    summarize_regression_predictions,
+    primary_metric_scores,
 )
 from separatix.utils.random import make_rng
 
@@ -139,24 +137,13 @@ def _score_predictions(
     names: np.ndarray | None,
 ) -> dict[str, float]:
     """Score one probe on one paired resample."""
-    if target_mode == "singlelabel":
-        summary = summarize_predictions(y_true[indices], predictions[indices])
-    elif target_mode == "multilabel":
-        if names is None:
-            raise ValueError("Multilabel paired comparisons require label names.")
-        summary = summarize_multilabel_predictions(
-            y_true[indices], predictions[indices], label_names=names
-        )
-    else:
-        if names is None:
-            raise ValueError("Regression paired comparisons require target names.")
-        summary = summarize_regression_predictions(
-            y_true[indices], predictions[indices], target_names=names
-        )
-    return {
-        metric: float(cast(Any, summary[metric]))
-        for metric in _metric_names(target_mode)
-    }
+    return primary_metric_scores(
+        y_true[indices],
+        predictions[indices],
+        target_mode=target_mode,
+        metrics=_metric_names(target_mode),
+        names=names,
+    )
 
 
 def build_paired_probe_comparisons(

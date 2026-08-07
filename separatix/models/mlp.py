@@ -11,7 +11,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
@@ -50,6 +50,7 @@ from separatix.models.scoring import (
     TargetMeanDummyRegressor,
     choose_cv,
     choose_regression_cv,
+    primary_metric_scores,
     summarize_multilabel_predictions,
     summarize_predictions,
     summarize_regression_predictions,
@@ -1438,18 +1439,18 @@ def _balanced_accuracy_delta(
     sample_idx: np.ndarray,
 ) -> float:
     """Return a balanced-accuracy delta on a bootstrap sample."""
-    first_score = cast(
-        float,
-        summarize_predictions(y_true[sample_idx], first_pred[sample_idx])[
-            "balanced_accuracy"
-        ],
-    )
-    second_score = cast(
-        float,
-        summarize_predictions(y_true[sample_idx], second_pred[sample_idx])[
-            "balanced_accuracy"
-        ],
-    )
+    first_score = primary_metric_scores(
+        y_true[sample_idx],
+        first_pred[sample_idx],
+        target_mode="singlelabel",
+        metrics=("balanced_accuracy",),
+    )["balanced_accuracy"]
+    second_score = primary_metric_scores(
+        y_true[sample_idx],
+        second_pred[sample_idx],
+        target_mode="singlelabel",
+        metrics=("balanced_accuracy",),
+    )["balanced_accuracy"]
     return float(first_score - second_score)
 
 
@@ -1463,15 +1464,19 @@ def _multilabel_metric_delta(
     label_names: np.ndarray,
 ) -> float:
     """Return a multilabel metric delta on a bootstrap sample."""
-    first = summarize_multilabel_predictions(
+    first = primary_metric_scores(
         Y_true[sample_idx],
         first_pred[sample_idx],
-        label_names=label_names,
+        target_mode="multilabel",
+        metrics=(metric,),
+        names=label_names,
     )
-    second = summarize_multilabel_predictions(
+    second = primary_metric_scores(
         Y_true[sample_idx],
         second_pred[sample_idx],
-        label_names=label_names,
+        target_mode="multilabel",
+        metrics=(metric,),
+        names=label_names,
     )
     return float(first[metric] - second[metric])
 
@@ -1486,15 +1491,19 @@ def _regression_metric_delta(
     target_names: np.ndarray,
 ) -> float:
     """Return a regression metric delta on a bootstrap sample."""
-    first = summarize_regression_predictions(
+    first = primary_metric_scores(
         Y_true[sample_idx],
         first_pred[sample_idx],
-        target_names=target_names,
+        target_mode="regression",
+        metrics=(metric,),
+        names=target_names,
     )
-    second = summarize_regression_predictions(
+    second = primary_metric_scores(
         Y_true[sample_idx],
         second_pred[sample_idx],
-        target_names=target_names,
+        target_mode="regression",
+        metrics=(metric,),
+        names=target_names,
     )
     return float(first[metric] - second[metric])
 
