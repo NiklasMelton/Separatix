@@ -971,6 +971,7 @@ def run_model_probes(
         evaluation_plan_id=evaluation_plan_id,
         evaluation_available=evaluation.get("alignment_status") == "aligned",
         groups=groups_used,
+        max_working_memory_mb=float(config.max_dense_mb),
     )
     return ProbeRunResult(results, evaluation, paired)
 
@@ -1377,6 +1378,7 @@ def run_regression_model_probes(
         evaluation_available=evaluation.get("alignment_status") == "aligned",
         groups=groups_used,
         names=target_names,
+        max_working_memory_mb=float(config.max_dense_mb),
     )
     return ProbeRunResult(results, evaluation, paired)
 
@@ -1822,5 +1824,6 @@ def run_multilabel_model_probes(
         evaluation_available=evaluation.get("alignment_status") == "aligned",
         groups=groups_used,
         names=label_names,
+        max_working_memory_mb=float(config.max_dense_mb),
     )
     return ProbeRunResult(results, evaluation, paired)
