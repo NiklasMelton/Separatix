@@ -8,7 +8,7 @@ from sklearn.datasets import make_blobs, make_classification, make_moons
 
 from separatix import diagnose
 from separatix.constants import (
-    FEATURE_OR_LABEL_BOTTLENECK_LIKELY,
+    FEATURE_OR_TARGET_BOTTLENECK_LIKELY,
     INCONCLUSIVE,
     KERNEL_OR_LOCAL_RECOMMENDED,
     LINEAR_LIKELY_SUFFICIENT,
@@ -120,14 +120,14 @@ def _permuted_blob_labels(seed: int) -> tuple[np.ndarray, np.ndarray]:
         (
             _random_labels,
             {
-                FEATURE_OR_LABEL_BOTTLENECK_LIKELY,
+                FEATURE_OR_TARGET_BOTTLENECK_LIKELY,
                 INCONCLUSIVE,
             },
         ),
         (
             _permuted_blob_labels,
             {
-                FEATURE_OR_LABEL_BOTTLENECK_LIKELY,
+                FEATURE_OR_TARGET_BOTTLENECK_LIKELY,
                 INCONCLUSIVE,
             },
         ),

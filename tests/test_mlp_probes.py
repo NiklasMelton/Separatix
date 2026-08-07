@@ -7,7 +7,6 @@ from sklearn.datasets import make_blobs
 from separatix import ProfilerConfig, diagnose
 from separatix.constants import (
     FEEDFORWARD_MLP_RECOMMENDED,
-    FEEDFORWARD_MLP_REGRESSION_RECOMMENDED,
 )
 from separatix.models import mlp as mlp_module
 from separatix.models.mlp import (
@@ -215,7 +214,7 @@ def test_regression_recommendation_can_be_overridden_by_mlp_evidence() -> None:
         scores, metrics
     )
 
-    assert recommendation == FEEDFORWARD_MLP_REGRESSION_RECOMMENDED
+    assert recommendation == FEEDFORWARD_MLP_RECOMMENDED
     assert "optional MLP probe clearly improved" in decision_path[0]
     assert any("mlp_two_layer_compact" in item for item in decision_path)
     assert "mlp_recommendation_evidence" in interpretations

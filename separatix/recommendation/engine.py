@@ -9,22 +9,14 @@ from typing import Any
 import numpy as np
 
 from separatix.constants import (
-    FEATURE_OR_LABEL_BOTTLENECK_LIKELY,
     FEATURE_OR_TARGET_BOTTLENECK_LIKELY,
     FEEDFORWARD_MLP_RECOMMENDED,
-    FEEDFORWARD_MLP_REGRESSION_RECOMMENDED,
     HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED,
-    HIGH_CAPACITY_OR_PARTITIONING_REGRESSION_RECOMMENDED,
     INCONCLUSIVE,
-    INCONCLUSIVE_REGRESSION_DIAGNOSTIC,
     INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY,
-    INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY,
     KERNEL_OR_LOCAL_RECOMMENDED,
-    KERNEL_OR_LOCAL_REGRESSION_RECOMMENDED,
     LINEAR_LIKELY_SUFFICIENT,
-    LINEAR_RESPONSE_LIKELY_SUFFICIENT,
     SMOOTH_NONLINEAR_RECOMMENDED,
-    SMOOTH_NONLINEAR_RESPONSE_RECOMMENDED,
 )
 from separatix.models.comparison import lookup_paired_comparison
 
@@ -59,11 +51,6 @@ _PROBE_DISPLAY_NAMES = {
 }
 _MULTILABEL_PRIMARY_METRICS = ("micro_f1", "macro_f1", "sample_jaccard")
 _REGRESSION_PRIMARY_METRICS = ("r2_variance_weighted", "r2_uniform_average")
-_REGRESSION_FAMILY_RECOMMENDATIONS = {
-    "linear": LINEAR_RESPONSE_LIKELY_SUFFICIENT,
-    "smooth_nonlinear": SMOOTH_NONLINEAR_RESPONSE_RECOMMENDED,
-    "local_kernel": KERNEL_OR_LOCAL_REGRESSION_RECOMMENDED,
-}
 
 
 def _context_quality_flags(metrics: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1092,7 +1079,7 @@ def _weak_signal_recommendation(evidence: dict[str, Any]) -> str:
     geometry = evidence["geometry"]
     overlap_vs_null = geometry.get("overlap_vs_label_shuffle")
     if overlap_vs_null is not None and overlap_vs_null >= MAX_NORMALIZED_SCORE:
-        return FEATURE_OR_LABEL_BOTTLENECK_LIKELY
+        return FEATURE_OR_TARGET_BOTTLENECK_LIKELY
     return INCONCLUSIVE
 
 
@@ -1942,7 +1929,7 @@ def make_multilabel_recommendation(
     elif not evidence["best_clearly_beats_dummy_on_two_primary_metrics"]:
         neighborhood = metrics.get("neighborhood", {})
         if neighborhood.get("mean_neighbor_jaccard", 1.0) < 0.2:
-            recommendation = FEATURE_OR_LABEL_BOTTLENECK_LIKELY
+            recommendation = FEATURE_OR_TARGET_BOTTLENECK_LIKELY
         else:
             recommendation = INCONCLUSIVE
         decision_path.append(
@@ -2658,7 +2645,7 @@ def make_regression_recommendation(
     flags = evidence["quality_flags"]
     decision_path: list[str] = []
     if any(flag.get("severity") == "blocking" for flag in flags):
-        recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY
+        recommendation = INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
         decision_path.append(
             "Essential regression probe evidence was unavailable, so the result "
             "is limited to data sufficiency and diagnostic reliability."
@@ -2668,7 +2655,7 @@ def make_regression_recommendation(
         recommendation = (
             FEATURE_OR_TARGET_BOTTLENECK_LIKELY
             if smoothness is not None and float(smoothness) < 0.35
-            else INCONCLUSIVE_REGRESSION_DIAGNOSTIC
+            else INCONCLUSIVE
         )
         decision_path.append(
             "The best predictive family did not clearly beat the target-mean "
@@ -2680,32 +2667,32 @@ def make_regression_recommendation(
             metrics.get("neighborhood", {}).get("high_discontinuity_fraction") or 0.0
         )
         if core_family == "linear":
-            recommendation = LINEAR_RESPONSE_LIKELY_SUFFICIENT
+            recommendation = _FAMILY_RECOMMENDATIONS[core_family]
             decision_path.append(
                 "The linear response family was within uncertainty of the best "
                 "observed family."
             )
         elif core_family == "smooth_nonlinear":
-            recommendation = SMOOTH_NONLINEAR_RESPONSE_RECOMMENDED
+            recommendation = _FAMILY_RECOMMENDATIONS[core_family]
             decision_path.append(
                 "Smooth nonlinear probes clearly improved over the linear "
                 "response family."
             )
         elif core_family == "local_kernel":
             if high_discontinuity >= 0.35:
-                recommendation = HIGH_CAPACITY_OR_PARTITIONING_REGRESSION_RECOMMENDED
+                recommendation = HIGH_CAPACITY_OR_PARTITIONING_RECOMMENDED
                 decision_path.append(
                     "Local or kernel-style probes improved over smooth probes, "
                     "and target-neighborhood diagnostics showed discontinuity."
                 )
             else:
-                recommendation = KERNEL_OR_LOCAL_REGRESSION_RECOMMENDED
+                recommendation = _FAMILY_RECOMMENDATIONS[core_family]
                 decision_path.append(
                     "Local or kernel-style probes clearly improved over smooth "
                     "nonlinear regression probes."
                 )
         else:
-            recommendation = INCONCLUSIVE_REGRESSION_DIAGNOSTIC
+            recommendation = INCONCLUSIVE
             decision_path.append(
                 "Primary regression metrics disagreed across probe families, "
                 "so no model-family recommendation was forced."
@@ -2713,7 +2700,7 @@ def make_regression_recommendation(
 
     if _mlp_override_active(metrics):
         mlp_payload = _mlp_override_payload(metrics)
-        recommendation = FEEDFORWARD_MLP_REGRESSION_RECOMMENDED
+        recommendation = FEEDFORWARD_MLP_RECOMMENDED
         decision_path.insert(
             0,
             "The optional MLP probe clearly improved over the aligned simpler "
@@ -2755,8 +2742,8 @@ def make_regression_recommendation(
         "low"
         if recommendation
         in {
-            INCONCLUSIVE_REGRESSION_DIAGNOSTIC,
-            INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY,
+            INCONCLUSIVE,
+            INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY,
         }
         else "medium"
     )

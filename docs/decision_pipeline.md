@@ -58,6 +58,24 @@ The profiler implementation that wires these stages together lives in
 and the final score aggregation and recommendation logic lives in
 [separatix/recommendation/engine.py](../separatix/recommendation/engine.py).
 
+## Shared Recommendation Labels
+
+All target modes emit the same eight machine-readable labels. Target type still
+selects the evidence and confidence rules, and the plain-text renderer uses it
+to keep model suggestions and headlines appropriate for classification,
+multilabel classification, or regression.
+
+| Label | Interpretation |
+| --- | --- |
+| `linear_likely_sufficient` | A linear probe is competitive with the strongest observed family. |
+| `smooth_nonlinear_recommended` | Smooth global nonlinear structure appears useful beyond linear models. |
+| `kernel_or_local_recommended` | A local or kernel-style family clearly improves on smoother families. |
+| `high_capacity_or_partitioning_recommended` | Local structure and fragmentation support a more partitioned, higher-capacity family. |
+| `feedforward_mlp_recommended` | An enabled MLP probe clears its configured override gates. |
+| `feature_or_target_bottleneck_likely` | Weak predictive signal is consistent with feature or target/label limitations. |
+| `insufficient_data_or_unreliable_geometry` | Evidence is too incomplete or unstable for a trustworthy family recommendation. |
+| `inconclusive` | The available evidence does not resolve a recommendation category. |
+
 ## Diagnostic Families
 
 The recommendation engine does not act on raw coordinates alone. It combines
@@ -69,8 +87,10 @@ several different views of the labeled feature space.
 - a multilabel path for binary indicator targets
 - an explicit regression path for continuous single- or multi-target problems
 
-The evidence objects and recommendation labels are tailored to the target
-structure.
+The evidence objects and confidence rules are tailored to the target structure,
+while the machine-readable recommendation vocabulary is shared across target
+modes. Plain-text rendering uses the target type to retain task-appropriate
+headlines and next-model suggestions.
 
 ### Dataset Audit
 
@@ -379,10 +399,10 @@ scores. Instead, it follows a conservative escalation policy:
 ### 1. Reliability Gate
 
 If essential evidence is missing or the diagnostic run is too incomplete to
-support a family recommendation, the result is:
-
-- `insufficient_data_or_unreliable_geometry` for classification
-- `insufficient_data_or_unreliable_regression_geometry` for regression
+support a family recommendation, the result is
+`insufficient_data_or_unreliable_geometry` for every target mode. Regression
+reports retain regression-specific wording in `recommendation_text` while
+sharing this machine-readable label.
 
 Reasoning:
 
@@ -414,7 +434,7 @@ when paired evidence is unavailable.
 
 If a classification signal test fails, the result is:
 
-- `feature_or_label_bottleneck_likely` when the neighborhoods already look as
+- `feature_or_target_bottleneck_likely` when the neighborhoods already look as
   mixed as a label-shuffled baseline would suggest
 - `inconclusive` otherwise
 
@@ -422,7 +442,7 @@ If the regression signal test fails, the result is:
 
 - `feature_or_target_bottleneck_likely` when target-neighborhood smoothness is
   below `0.35`
-- `inconclusive_regression_diagnostic` otherwise
+- `inconclusive` otherwise
 
 Reasoning:
 
@@ -443,8 +463,7 @@ If signal is present, `separatix` compares probe families in complexity order:
 If the linear family is statistically close enough to the strongest observed
 family, the result is:
 
-- `linear_likely_sufficient` for classification
-- `linear_response_likely_sufficient` for regression
+- `linear_likely_sufficient` for every target mode
 
 Reasoning:
 
@@ -461,8 +480,7 @@ Reasoning:
 
 If linear is no longer sufficient, the default nonlinear recommendation is:
 
-- `smooth_nonlinear_recommended` for classification
-- `smooth_nonlinear_response_recommended` for regression
+- `smooth_nonlinear_recommended` for every target mode
 
 Reasoning:
 
@@ -483,8 +501,7 @@ Reasoning:
 The local/kernel recommendation is reserved for cases where that family clearly
 beats the smooth nonlinear family after uncertainty adjustment:
 
-- `kernel_or_local_recommended` for classification
-- `kernel_or_local_regression_recommended` for regression
+- `kernel_or_local_recommended` for every target mode
 
 Reasoning:
 
@@ -523,8 +540,7 @@ high-capacity/partitioning structural upgrade.
 If the local/kernel family clearly wins and the boundary evidence also suggests
 fragmented structure, the result can be upgraded to:
 
-- `high_capacity_or_partitioning_recommended` for classification
-- `higher_capacity_or_partitioning_regression_recommended` for regression
+- `high_capacity_or_partitioning_recommended` for every target mode
 
 Reasoning:
 
@@ -541,8 +557,8 @@ Reasoning:
 
 If none of the above branches dominate, the result is:
 
-- `inconclusive` for classification
-- `inconclusive_regression_diagnostic` for regression
+`inconclusive` for every target mode. Regression reports retain
+regression-specific wording in `recommendation_text` while sharing the label.
 
 Reasoning:
 

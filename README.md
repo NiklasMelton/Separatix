@@ -259,25 +259,24 @@ next-best eligible MLP by at least 0.01 held-out balanced accuracy.
 
 ## Recommendation Categories
 
+The same eight machine-readable labels are used for single-label classification,
+multilabel classification, and explicit regression. Target mode still controls
+the evidence, confidence rules, and plain-text wording (for example, a shared
+`linear_likely_sufficient` label is rendered with regression-specific model
+suggestions when `target_type` is `regression`).
+
 - `linear_likely_sufficient`
 - `smooth_nonlinear_recommended`
 - `kernel_or_local_recommended`
 - `high_capacity_or_partitioning_recommended`
 - `feedforward_mlp_recommended`
-- `feature_or_label_bottleneck_likely`
+- `feature_or_target_bottleneck_likely`
 - `insufficient_data_or_unreliable_geometry`
 - `inconclusive`
-- `linear_response_likely_sufficient`
-- `smooth_nonlinear_response_recommended`
-- `kernel_or_local_regression_recommended`
-- `higher_capacity_or_partitioning_regression_recommended`
-- `feedforward_mlp_regression_recommended`
-- `feature_or_target_bottleneck_likely`
-- `insufficient_data_or_unreliable_regression_geometry`
-- `inconclusive_regression_diagnostic`
 
 These categories are intentionally coarse. They describe the apparent geometry
-and difficulty of the labeled feature space, not a guaranteed best model choice.
+and difficulty of the labeled feature space or response surface, not a
+guaranteed best model choice.
 
 The synthetic recommendation ladder below shows how `separatix` responds as the
 designed dataset geometry moves from simple linear structure toward smoother
