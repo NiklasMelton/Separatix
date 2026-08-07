@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from scipy import sparse
 
 from separatix import ComplexityProfiler, diagnose
+from separatix.models import mlp as mlp_module
+from separatix.models import scoring as scoring_module
 from separatix.models.comparison import (
     bootstrap_indices,
     build_paired_probe_comparisons,
     lookup_paired_comparison,
+)
+from separatix.models.mlp import (
+    _balanced_accuracy_delta,
+    _multilabel_metric_delta,
+    _regression_metric_delta,
+)
+from separatix.models.scoring import (
+    primary_metric_scores,
+    summarize_multilabel_predictions,
+    summarize_predictions,
+    summarize_regression_predictions,
 )
 from separatix.recommendation.engine import compute_scores, make_recommendation
 
@@ -82,6 +96,527 @@ def test_identical_predictions_have_zero_paired_interval() -> None:
     assert comparison["point_delta"] == 0.0
     assert comparison["lower_95"] == 0.0
     assert comparison["upper_95"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("y_true", "y_pred"),
+    [
+        (
+            np.asarray([0, 1, 0, 1, 0, 1, 1, 0]),
+            np.asarray([0, 1, 1, 1, 0, 0, 1, 0]),
+        ),
+        (
+            np.asarray([0, 1, 2, 0, 1, 2, 2, 1, 0]),
+            np.asarray([0, 2, 2, 1, 1, 2, 0, 1, 0]),
+        ),
+    ],
+)
+def test_primary_singlelabel_scores_match_full_summary(
+    y_true: np.ndarray, y_pred: np.ndarray
+) -> None:
+    """The optimized single-label scorer preserves the full summary metric."""
+    expected = summarize_predictions(y_true, y_pred)["balanced_accuracy"]
+
+    all_metrics = primary_metric_scores(
+        y_true,
+        y_pred,
+        target_mode="singlelabel",
+    )
+    selected = primary_metric_scores(
+        y_true,
+        y_pred,
+        target_mode="singlelabel",
+        metrics=("balanced_accuracy",),
+    )
+
+    assert all_metrics == selected
+    assert all_metrics["balanced_accuracy"] == pytest.approx(float(expected))
+
+
+@pytest.mark.parametrize(
+    ("Y_true", "Y_pred"),
+    [
+        # One indicator column with no positive labels (empty label sets).
+        (
+            np.zeros((8, 1), dtype=int),
+            np.zeros((8, 1), dtype=int),
+        ),
+        # One indicator column with both classes represented.
+        (
+            np.asarray([[0], [1], [0], [1], [1], [0], [1], [0]], dtype=int),
+            np.asarray([[0], [1], [1], [0], [1], [0], [0], [0]], dtype=int),
+        ),
+        # Multiple columns where one label is constant and rows can be empty.
+        (
+            np.asarray(
+                [[0, 0, 1], [0, 0, 0], [1, 0, 1], [1, 0, 0], [0, 0, 0]],
+                dtype=int,
+            ),
+            np.asarray(
+                [[0, 0, 1], [0, 0, 1], [1, 0, 0], [0, 0, 0], [0, 0, 0]],
+                dtype=int,
+            ),
+        ),
+        # A constant positive multi-column target.
+        (
+            np.ones((7, 3), dtype=int),
+            np.asarray(
+                [
+                    [1, 1, 1],
+                    [1, 1, 0],
+                    [1, 0, 1],
+                    [1, 1, 1],
+                    [1, 1, 1],
+                    [0, 1, 1],
+                    [1, 1, 1],
+                ],
+                dtype=int,
+            ),
+        ),
+    ],
+)
+def test_primary_multilabel_scores_match_full_summary(
+    Y_true: np.ndarray, Y_pred: np.ndarray
+) -> None:
+    """Primary multilabel scores agree for one- and multi-column edge cases."""
+    names = np.asarray([f"label-{index}" for index in range(Y_true.shape[1])])
+    expected = summarize_multilabel_predictions(
+        Y_true,
+        Y_pred,
+        label_names=names,
+    )
+
+    all_metrics = primary_metric_scores(
+        Y_true,
+        Y_pred,
+        target_mode="multilabel",
+        names=names,
+    )
+    selected = primary_metric_scores(
+        Y_true,
+        Y_pred,
+        target_mode="multilabel",
+        metrics=("micro_f1", "macro_f1", "sample_jaccard"),
+        names=names,
+    )
+
+    assert all_metrics == selected
+    for metric in ("micro_f1", "macro_f1", "sample_jaccard"):
+        assert all_metrics[metric] == pytest.approx(float(expected[metric]))
+
+
+@pytest.mark.parametrize(
+    ("Y_true", "Y_pred"),
+    [
+        (
+            np.full((8, 1), 4.0),
+            np.full((8, 1), 4.0),
+        ),
+        (
+            np.asarray(
+                [[0.0], [1.0], [1.0], [2.0], [2.0], [3.0], [3.0], [4.0]],
+            ),
+            np.asarray(
+                [[0.0], [1.2], [0.8], [2.1], [1.7], [3.0], [3.4], [3.8]],
+            ),
+        ),
+        # Duplicated rows and one constant target exercise multi-target handling.
+        (
+            np.asarray(
+                [
+                    [0.0, 2.0],
+                    [0.0, 2.0],
+                    [1.0, 2.0],
+                    [1.0, 2.0],
+                    [2.0, 2.0],
+                    [2.0, 2.0],
+                    [3.0, 2.0],
+                    [3.0, 2.0],
+                ]
+            ),
+            np.asarray(
+                [
+                    [0.0, 2.0],
+                    [0.2, 1.0],
+                    [0.8, 2.0],
+                    [1.1, 1.5],
+                    [2.2, 2.0],
+                    [1.8, 2.0],
+                    [3.0, 2.0],
+                    [3.2, 2.0],
+                ]
+            ),
+        ),
+    ],
+)
+def test_primary_regression_scores_match_full_summary(
+    Y_true: np.ndarray, Y_pred: np.ndarray
+) -> None:
+    """Primary regression scores preserve constant and duplicated-target behavior."""
+    names = np.asarray([f"target-{index}" for index in range(Y_true.shape[1])])
+    expected = summarize_regression_predictions(
+        Y_true,
+        Y_pred,
+        target_names=names,
+    )
+
+    all_metrics = primary_metric_scores(
+        Y_true,
+        Y_pred,
+        target_mode="regression",
+        names=names,
+    )
+    selected = primary_metric_scores(
+        Y_true,
+        Y_pred,
+        target_mode="regression",
+        metrics=("r2_variance_weighted", "r2_uniform_average"),
+        names=names,
+    )
+
+    assert all_metrics == selected
+    for metric in ("r2_variance_weighted", "r2_uniform_average"):
+        assert all_metrics[metric] == pytest.approx(float(expected[metric]))
+
+
+def test_primary_metric_scores_validate_target_mode_metrics_and_names() -> None:
+    """Invalid modes, metrics, and target-name metadata fail clearly."""
+    y = np.asarray([0, 1, 0, 1])
+    Y = np.column_stack([y, 1 - y])
+    names = np.asarray(["first", "second"])
+
+    with pytest.raises(ValueError):
+        primary_metric_scores(y, y, target_mode="unknown")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        primary_metric_scores(
+            y,
+            y,
+            target_mode="singlelabel",
+            metrics=("not_a_metric",),
+        )
+    with pytest.raises(ValueError):
+        primary_metric_scores(Y, Y, target_mode="multilabel")
+    with pytest.raises(IndexError):
+        primary_metric_scores(Y, Y, target_mode="multilabel", names=np.asarray(["one"]))
+    with pytest.raises(IndexError):
+        primary_metric_scores(
+            Y.astype(float),
+            Y.astype(float),
+            target_mode="regression",
+            names=np.asarray(["one"]),
+        )
+    # Correct metadata remains accepted for both matrix-valued target modes.
+    assert set(primary_metric_scores(Y, Y, target_mode="multilabel", names=names)) == {
+        "micro_f1",
+        "macro_f1",
+        "sample_jaccard",
+    }
+
+
+def test_mlp_singlelabel_delta_matches_primary_and_full_scorers() -> None:
+    """The MLP single-label delta helper scores only its primary metric."""
+    y_true = np.asarray([0, 1, 0, 1, 0, 1, 1, 0])
+    first_pred = np.asarray([0, 1, 1, 1, 0, 0, 1, 0])
+    second_pred = np.asarray([0, 0, 0, 1, 1, 1, 0, 0])
+    sample_idx = np.asarray([0, 1, 2, 3, 4, 5, 6, 7, 1])
+    expected = float(
+        summarize_predictions(y_true[sample_idx], first_pred[sample_idx])[
+            "balanced_accuracy"
+        ]
+    ) - float(
+        summarize_predictions(y_true[sample_idx], second_pred[sample_idx])[
+            "balanced_accuracy"
+        ]
+    )
+
+    assert _balanced_accuracy_delta(
+        y_true, first_pred, second_pred, sample_idx
+    ) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("metric", ["micro_f1", "macro_f1", "sample_jaccard"])
+def test_mlp_multilabel_delta_matches_primary_and_full_scorers(metric: str) -> None:
+    """The MLP multilabel delta helper preserves each primary metric."""
+    Y_true = np.asarray(
+        [[0, 0], [1, 0], [0, 1], [1, 1], [0, 0], [1, 0], [0, 1], [1, 1]],
+        dtype=int,
+    )
+    first_pred = np.asarray(
+        [[0, 0], [1, 0], [0, 1], [1, 1], [0, 0], [1, 1], [0, 0], [1, 1]],
+        dtype=int,
+    )
+    second_pred = np.asarray(
+        [[0, 0], [0, 0], [0, 1], [1, 0], [0, 0], [1, 0], [0, 1], [0, 0]],
+        dtype=int,
+    )
+    sample_idx = np.asarray([0, 1, 2, 3, 4, 5, 6, 7, 3])
+    names = np.asarray(["first", "second"])
+    first = summarize_multilabel_predictions(
+        Y_true[sample_idx], first_pred[sample_idx], label_names=names
+    )
+    second = summarize_multilabel_predictions(
+        Y_true[sample_idx], second_pred[sample_idx], label_names=names
+    )
+    expected = float(first[metric]) - float(second[metric])
+
+    assert _multilabel_metric_delta(
+        Y_true,
+        first_pred,
+        second_pred,
+        sample_idx,
+        metric=metric,
+        label_names=names,
+    ) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("metric", ["r2_variance_weighted", "r2_uniform_average"])
+def test_mlp_regression_delta_matches_primary_and_full_scorers(metric: str) -> None:
+    """The MLP regression delta helper preserves both primary R2 metrics."""
+    Y_true = np.asarray(
+        [[0.0, 1.0], [0.0, 1.0], [1.0, 2.0], [1.0, 2.0], [2.0, 3.0], [2.0, 3.0]]
+    )
+    first_pred = np.asarray(
+        [[0.0, 1.0], [0.1, 1.0], [0.9, 2.0], [1.1, 2.0], [2.0, 3.0], [2.1, 3.0]]
+    )
+    second_pred = np.asarray(
+        [[0.5, 1.0], [0.5, 1.0], [0.5, 2.0], [0.5, 2.0], [0.5, 3.0], [0.5, 3.0]]
+    )
+    sample_idx = np.asarray([0, 1, 2, 3, 4, 5, 2])
+    names = np.asarray(["varying", "constant-ish"])
+    first = summarize_regression_predictions(
+        Y_true[sample_idx], first_pred[sample_idx], target_names=names
+    )
+    second = summarize_regression_predictions(
+        Y_true[sample_idx], second_pred[sample_idx], target_names=names
+    )
+    expected = float(first[metric]) - float(second[metric])
+
+    assert _regression_metric_delta(
+        Y_true,
+        first_pred,
+        second_pred,
+        sample_idx,
+        metric=metric,
+        target_names=names,
+    ) == pytest.approx(expected)
+
+
+def test_primary_comparison_and_delta_paths_skip_full_summarizers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The optimized paths do not construct detailed summary payloads."""
+
+    def fail_summary(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("full summarizer should not run in primary scoring paths")
+
+    for module in (mlp_module, scoring_module):
+        monkeypatch.setattr(module, "summarize_predictions", fail_summary)
+        monkeypatch.setattr(module, "summarize_multilabel_predictions", fail_summary)
+        monkeypatch.setattr(module, "summarize_regression_predictions", fail_summary)
+
+    y_true = np.asarray([0, 1, 0, 1] * 4)
+    first_pred = y_true.copy()
+    second_pred = np.zeros_like(y_true)
+    score_first = primary_metric_scores(
+        y_true,
+        first_pred,
+        target_mode="singlelabel",
+    )
+    score_second = primary_metric_scores(
+        y_true,
+        second_pred,
+        target_mode="singlelabel",
+    )
+    probes = {
+        name: {
+            **scores,
+            "predictions": predictions.tolist(),
+            "evaluation_plan_id": "plan",
+        }
+        for name, predictions, scores in (
+            ("dummy", second_pred, score_second),
+            ("linear", first_pred, score_first),
+        )
+    }
+    payload = build_paired_probe_comparisons(
+        probes,
+        y_true,
+        target_mode="singlelabel",
+        requested_resamples=60,
+        random_state=4,
+        evaluation_plan_id="plan",
+        evaluation_available=True,
+    )
+
+    assert payload["status"] == "available"
+    sample_idx = np.arange(y_true.shape[0])
+    assert _balanced_accuracy_delta(y_true, first_pred, second_pred, sample_idx) > 0.0
+
+
+def test_multilabel_paired_payload_is_deterministic_with_primary_scores() -> None:
+    """Aligned multilabel comparisons remain byte-for-byte deterministic."""
+    Y_true = np.asarray(
+        [[0, 0], [1, 0], [0, 1], [1, 1]] * 10,
+        dtype=int,
+    )
+    first_pred = Y_true.copy()
+    second_pred = np.zeros_like(Y_true)
+    names = np.asarray(["left", "right"])
+    probes = {
+        name: {
+            **{
+                metric: float(
+                    summarize_multilabel_predictions(
+                        Y_true,
+                        predictions,
+                        label_names=names,
+                    )[metric]
+                )
+                for metric in ("micro_f1", "macro_f1", "sample_jaccard")
+            },
+            "predictions": predictions.tolist(),
+            "evaluation_plan_id": "plan",
+        }
+        for name, predictions in {
+            "dummy": second_pred,
+            "linear": first_pred,
+        }.items()
+    }
+
+    first = build_paired_probe_comparisons(
+        probes,
+        Y_true,
+        target_mode="multilabel",
+        requested_resamples=75,
+        random_state=12,
+        evaluation_plan_id="plan",
+        evaluation_available=True,
+        names=names,
+    )
+    second = build_paired_probe_comparisons(
+        probes,
+        Y_true,
+        target_mode="multilabel",
+        requested_resamples=75,
+        random_state=12,
+        evaluation_plan_id="plan",
+        evaluation_available=True,
+        names=names,
+    )
+
+    assert first == second
+    assert first["status"] == "available"
+    assert first["resamples_used"] == 75
+
+
+def test_regression_paired_payload_is_deterministic_with_primary_scores() -> None:
+    """Aligned regression comparisons preserve deterministic paired resamples."""
+    Y_true = np.asarray(
+        [
+            [0.0, 2.0],
+            [0.0, 2.0],
+            [1.0, 2.0],
+            [1.0, 2.0],
+            [2.0, 2.0],
+            [2.0, 2.0],
+            [3.0, 2.0],
+            [3.0, 2.0],
+        ]
+        * 5
+    )
+    first_pred = Y_true.copy()
+    second_pred = np.column_stack(
+        [np.full(Y_true.shape[0], 1.5), np.full(Y_true.shape[0], 2.0)]
+    )
+    names = np.asarray(["varying", "constant"])
+    probes = {
+        name: {
+            **{
+                metric: float(
+                    summarize_regression_predictions(
+                        Y_true,
+                        predictions,
+                        target_names=names,
+                    )[metric]
+                )
+                for metric in ("r2_variance_weighted", "r2_uniform_average")
+            },
+            "predictions": predictions.tolist(),
+            "evaluation_plan_id": "plan",
+        }
+        for name, predictions in {
+            "dummy": second_pred,
+            "linear": first_pred,
+        }.items()
+    }
+
+    first = build_paired_probe_comparisons(
+        probes,
+        Y_true,
+        target_mode="regression",
+        requested_resamples=75,
+        random_state=12,
+        evaluation_plan_id="plan",
+        evaluation_available=True,
+        names=names,
+    )
+    second = build_paired_probe_comparisons(
+        probes,
+        Y_true,
+        target_mode="regression",
+        requested_resamples=75,
+        random_state=12,
+        evaluation_plan_id="plan",
+        evaluation_available=True,
+        names=names,
+    )
+
+    assert first == second
+    assert first["status"] == "available"
+    assert first["resamples_used"] == 75
+
+
+@pytest.mark.parametrize("target_mode", ["multilabel", "regression"])
+def test_matrix_paired_comparisons_require_target_names(target_mode: str) -> None:
+    """Missing matrix-target names retain the unavailable comparison path."""
+    if target_mode == "multilabel":
+        y_true = np.asarray([[0, 0], [1, 0], [0, 1], [1, 1]] * 4, dtype=int)
+        pred_a = y_true.copy()
+        pred_b = np.zeros_like(y_true)
+        metrics = ("micro_f1", "macro_f1", "sample_jaccard")
+        summary = summarize_multilabel_predictions(
+            y_true, pred_a, label_names=np.asarray(["a", "b"])
+        )
+    else:
+        y_true = np.asarray([[0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [1.0, 1.0]] * 4)
+        pred_a = y_true.copy()
+        pred_b = np.zeros_like(y_true)
+        metrics = ("r2_variance_weighted", "r2_uniform_average")
+        summary = summarize_regression_predictions(
+            y_true, pred_a, target_names=np.asarray(["a", "b"])
+        )
+    probes = {
+        name: {
+            **{metric: float(summary[metric]) for metric in metrics},
+            "predictions": predictions.tolist(),
+            "evaluation_plan_id": "plan",
+        }
+        for name, predictions in {"dummy": pred_b, "linear": pred_a}.items()
+    }
+
+    payload = build_paired_probe_comparisons(
+        probes,
+        y_true,
+        target_mode=target_mode,  # type: ignore[arg-type]
+        requested_resamples=60,
+        random_state=1,
+        evaluation_plan_id="plan",
+        evaluation_available=True,
+    )
+
+    assert payload["status"] == "unavailable"
+    assert payload["resamples_used"] == 0
+    assert "too few valid" in payload["reason"]
 
 
 def test_group_bootstrap_keeps_group_rows_whole() -> None:

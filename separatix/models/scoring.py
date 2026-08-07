@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, Literal
 
 import numpy as np
 from scipy import sparse
@@ -34,6 +35,14 @@ from separatix.sampling import (
     choose_multilabel_holdout,
     grouped_singlelabel_cv,
 )
+
+PrimaryTargetMode = Literal["singlelabel", "multilabel", "regression"]
+
+_PRIMARY_METRIC_NAMES: dict[PrimaryTargetMode, tuple[str, ...]] = {
+    "singlelabel": ("balanced_accuracy",),
+    "multilabel": ("micro_f1", "macro_f1", "sample_jaccard"),
+    "regression": ("r2_variance_weighted", "r2_uniform_average"),
+}
 
 
 def summarize_effective_train_size(
@@ -717,6 +726,153 @@ def summarize_regression_predictions(
             "max": float(np.max(per_target_nrmse)) if per_target_nrmse else None,
         },
     }
+
+
+def primary_metric_scores(
+    y_true: Any,
+    y_pred: Any,
+    *,
+    target_mode: PrimaryTargetMode,
+    metrics: Iterable[str] | str | None = None,
+    names: np.ndarray | None = None,
+) -> dict[str, float]:
+    """Return only the requested primary prediction metrics.
+
+    This is the lightweight scoring path used by paired resampling (and by
+    optional probe comparisons).  The full ``summarize_*`` functions retain
+    their detailed per-class, per-label, and per-target payloads for reports;
+    this helper avoids constructing those payloads when only primary metrics
+    are needed.
+
+    ``names`` is intentionally required for multilabel and regression modes,
+    even though the primary aggregate formulas do not consume the values.  It
+    preserves the validation contract of the paired-comparison path, where
+    label/target names identify a valid summary schema.
+    """
+    if target_mode not in _PRIMARY_METRIC_NAMES:
+        raise ValueError(f"Unsupported target mode: {target_mode!r}.")
+    allowed = _PRIMARY_METRIC_NAMES[target_mode]
+    if metrics is None:
+        requested = allowed
+    elif isinstance(metrics, str):
+        requested = (metrics,)
+    else:
+        requested = tuple(metrics)
+    invalid = tuple(metric for metric in requested if metric not in allowed)
+    if invalid:
+        raise ValueError(
+            f"Unsupported primary metric(s) for {target_mode}: {', '.join(invalid)}."
+        )
+    if target_mode == "multilabel" and names is None:
+        raise ValueError("Multilabel paired comparisons require label names.")
+    if target_mode == "regression" and names is None:
+        raise ValueError("Regression paired comparisons require target names.")
+
+    if target_mode == "singlelabel":
+        if not requested:
+            return {}
+        true = np.asarray(y_true)
+        pred = np.asarray(y_pred)
+        return {"balanced_accuracy": float(balanced_accuracy_score(true, pred))}
+
+    if target_mode == "multilabel":
+        if not requested:
+            return {}
+        assert names is not None
+        true_dense = _dense_multilabel_matrix(y_true)
+        pred_dense = _dense_multilabel_matrix(y_pred)
+        # The detailed summary indexes one name per output.  Validate the
+        # same shape requirement here so malformed metadata fails consistently
+        # on the lightweight primary-metric path too.
+        if len(names) < true_dense.shape[1]:
+            raise IndexError("Multilabel label names do not cover every output.")
+        true_bool = true_dense.astype(bool, copy=False)
+        pred_bool = pred_dense.astype(bool, copy=False)
+        scores: dict[str, float] = {}
+
+        if "micro_f1" in requested:
+            true_positive = float(np.logical_and(true_bool, pred_bool).sum())
+            false_positive = float(np.logical_and(~true_bool, pred_bool).sum())
+            false_negative = float(np.logical_and(true_bool, ~pred_bool).sum())
+            denominator = (2.0 * true_positive) + false_positive + false_negative
+            scores["micro_f1"] = (
+                0.0
+                if denominator == 0.0
+                else float((2.0 * true_positive) / denominator)
+            )
+
+        if "macro_f1" in requested:
+            true_positive = (
+                np.logical_and(true_bool, pred_bool).sum(axis=0).astype(float)
+            )
+            predicted_positive = pred_bool.sum(axis=0).astype(float)
+            actual_positive = true_bool.sum(axis=0).astype(float)
+            precision = np.divide(
+                true_positive,
+                predicted_positive,
+                out=np.zeros_like(true_positive, dtype=float),
+                where=predicted_positive > 0,
+            )
+            recall = np.divide(
+                true_positive,
+                actual_positive,
+                out=np.zeros_like(true_positive, dtype=float),
+                where=actual_positive > 0,
+            )
+            f1_denominator = precision + recall
+            f1_values = np.divide(
+                2.0 * precision * recall,
+                f1_denominator,
+                out=np.zeros_like(f1_denominator, dtype=float),
+                where=f1_denominator > 0,
+            )
+            scores["macro_f1"] = float(np.mean(f1_values)) if f1_values.size else 0.0
+
+        if "sample_jaccard" in requested:
+            intersections = (
+                np.logical_and(true_bool, pred_bool).sum(axis=1).astype(float)
+            )
+            unions = np.logical_or(true_bool, pred_bool).sum(axis=1).astype(float)
+            sample_jaccard = np.divide(
+                intersections,
+                unions,
+                out=np.ones_like(intersections, dtype=float),
+                where=unions > 0,
+            )
+            scores["sample_jaccard"] = float(np.mean(sample_jaccard))
+        return scores
+
+    if not requested:
+        return {}
+    assert names is not None
+    true = np.asarray(y_true, dtype=float)
+    if true.ndim == 1:
+        true = true.reshape(-1, 1)
+    pred = np.asarray(y_pred, dtype=float).reshape(true.shape)
+    # Match ``summarize_regression_predictions`` name indexing semantics.
+    if len(names) < true.shape[1]:
+        raise IndexError("Regression target names do not cover every output.")
+    variances = np.var(true, axis=0)
+    usable = variances > 1e-12
+    scores = {}
+    if np.any(usable) and true.shape[0] >= 2:
+        for metric in requested:
+            multioutput = (
+                "variance_weighted"
+                if metric == "r2_variance_weighted"
+                else "uniform_average"
+            )
+            value = float(
+                r2_score(
+                    true[:, usable],
+                    pred[:, usable],
+                    multioutput=multioutput,
+                )
+            )
+            scores[metric] = value if np.isfinite(value) else 0.0
+    else:
+        scores = {metric: 0.0 for metric in requested}
+    return scores
 
 
 class TargetMeanDummyRegressor(BaseEstimator, RegressorMixin):
