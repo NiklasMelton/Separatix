@@ -18,6 +18,19 @@ paired bootstrap resamples whole groups, rather than individual rows, and
 single-label resamples that lose required class support are rejected. The
 report records how many paired resamples were requested and successfully used.
 
+Optional MLP probes use a separately capped, dense cohort, so their paired
+bootstrap cache is local to that cohort rather than reused from the ordinary
+probe comparison. Group-aware MLP sampling keeps groups whole, and MLP
+held-out folds remain group-disjoint. The local cache also resamples whole
+groups; single-label draws that lose class support are rejected, while any
+non-finite target-aware score row is discarded. The full required comparator
+results remain under `report.metrics["mlp_probes"]["aligned_comparators"]` even
+though `pairwise_comparisons` retains only the best MLP versus dummy and the
+metric-specific strongest simpler comparator. If support-preserving sampling or
+fold construction fails, paired MLP comparison is marked `not_run`; if the
+cache cannot retain enough valid paired rows, it is `unavailable`. Neither
+condition is replaced with in-sample override evidence.
+
 ## Sparse inputs
 
 Sparse feature matrices are accepted directly, and sparse-compatible operations

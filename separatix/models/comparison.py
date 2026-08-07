@@ -31,12 +31,38 @@ class _ResampleBatch:
 
 
 @dataclass
-class _ComparisonAccumulator:
-    """Accumulate accepted bootstrap deltas without changing report schema."""
+class _PairedScoreCache:
+    """Finite primary scores from one paired bootstrap resample plan.
 
-    deltas: dict[tuple[str, str, str], list[float]]
-    resample_digest: Any
-    used: int = 0
+    ``scores`` is a dense ``[resample, probe, metric]`` tensor containing only
+    accepted rows.  Keeping the accepted rows (rather than paired deltas) lets
+    callers compare any two probes included in the cache without drawing
+    another bootstrap plan.
+    """
+
+    scores: np.ndarray
+    probe_names: tuple[str, ...]
+    metric_names: tuple[str, ...]
+    status: str
+    reason: str | None
+    resamples_requested: int
+    resamples_used: int
+    resample_plan_id: str | None
+
+    @property
+    def requested(self) -> int:
+        """Return the requested number of paired bootstrap resamples."""
+        return self.resamples_requested
+
+    @property
+    def used(self) -> int:
+        """Return the number of finite paired bootstrap rows retained."""
+        return self.resamples_used
+
+    @property
+    def plan_id(self) -> str | None:
+        """Return the stable identifier for the accepted resample plan."""
+        return self.resample_plan_id
 
 
 def bootstrap_indices(
@@ -342,84 +368,225 @@ def _finite_score_row(
     )
 
 
-def _record_resample_scores(
-    accumulator: _ComparisonAccumulator,
-    sample_idx: np.ndarray,
+def _score_row_array(
     scores: Mapping[str, Mapping[str, float]],
     *,
-    pairs: list[tuple[str, str]],
+    probe_names: tuple[str, ...],
     metric_names: tuple[str, ...],
-) -> bool:
-    """Record one finite paired score row and preserve its original hash bytes."""
+) -> np.ndarray | None:
+    """Convert one finite scalar-score mapping to cache tensor row form."""
     if not _finite_score_row(scores, metric_names=metric_names):
-        return False
-    accumulator.resample_digest.update(sample_idx.tobytes())
-    accumulator.used += 1
-    for first, second in pairs:
-        for metric in metric_names:
-            accumulator.deltas[(first, second, metric)].append(
-                float(scores[first][metric]) - float(scores[second][metric])
-            )
-    return True
-
-
-def _record_tensor_batch_scores(
-    accumulator: _ComparisonAccumulator,
-    batch: _ResampleBatch,
-    tensor_scores: np.ndarray,
-    *,
-    pairs: list[tuple[str, str]],
-    metric_names: tuple[str, ...],
-    probe_positions: Mapping[str, int],
-    scalar_fallback: Callable[[np.ndarray], Mapping[str, Mapping[str, float]] | None],
-) -> None:
-    """Record one finite tensor batch, scalar-falling back per bad row."""
-    finite_rows = np.all(np.isfinite(tensor_scores), axis=(1, 2))
-    valid_positions = np.flatnonzero(finite_rows)
-    scalar_scores: dict[int, Mapping[str, Mapping[str, float]]] = {}
-    accepted_rows = finite_rows.copy()
-    # Hash and count rows in stream order.  Scalar fallback rows are retained
-    # so vectorized deltas can be merged back into their original order.
-    for row, sample_idx in enumerate(batch.indices):
-        if bool(finite_rows[row]):
-            accumulator.resample_digest.update(sample_idx.tobytes())
-            accumulator.used += 1
-        else:
-            scores = scalar_fallback(sample_idx)
-            if scores is not None and _finite_score_row(
-                scores, metric_names=metric_names
-            ):
-                scalar_scores[row] = scores
-                accepted_rows[row] = True
-                accumulator.resample_digest.update(sample_idx.tobytes())
-                accumulator.used += 1
-
-    accepted_positions = np.flatnonzero(accepted_rows)
-    for first, second in pairs:
-        first_scores = tensor_scores[valid_positions, probe_positions[first], :]
-        second_scores = tensor_scores[valid_positions, probe_positions[second], :]
-        differences = first_scores - second_scores
-        ordered_differences = np.empty(
-            (accepted_positions.size, len(metric_names)), dtype=float
+        return None
+    try:
+        row = np.asarray(
+            [
+                [float(scores[probe][metric]) for metric in metric_names]
+                for probe in probe_names
+            ],
+            dtype=np.float64,
         )
-        if valid_positions.size:
-            valid_output_positions = np.searchsorted(
-                accepted_positions, valid_positions
-            )
-            ordered_differences[valid_output_positions] = differences
-        for row, scores in scalar_scores.items():
-            output_position = int(np.searchsorted(accepted_positions, row))
-            ordered_differences[output_position] = np.asarray(
-                [
-                    float(scores[first][metric]) - float(scores[second][metric])
-                    for metric in metric_names
-                ],
-                dtype=float,
-            )
-        for metric_index, metric in enumerate(metric_names):
-            accumulator.deltas[(first, second, metric)].extend(
-                ordered_differences[:, metric_index].tolist()
-            )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if row.shape != (len(probe_names), len(metric_names)) or not np.all(
+        np.isfinite(row)
+    ):
+        return None
+    return row
+
+
+def _build_paired_score_cache(
+    y_true: np.ndarray,
+    predictions: Mapping[str, np.ndarray],
+    *,
+    target_mode: TargetMode,
+    requested_resamples: int,
+    random_state: int | None,
+    groups: np.ndarray | None = None,
+    names: np.ndarray | None = None,
+    max_working_memory_mb: float | None = None,
+) -> _PairedScoreCache:
+    """Build finite primary scores for one target-aware paired resample plan.
+
+    The returned cache is deliberately independent of any pair selection.  A
+    single target-aware resample stream is scored with the chunked tensor path
+    whenever it is numerically safe; rows that produce a non-finite tensor are
+    retried through the scalar compatibility scorer.  Only rows containing a
+    finite score for every probe and requested metric are retained, so any
+    subsequent pair summary uses exactly the same accepted resamples.
+    """
+    y_array = np.asarray(y_true)
+    prediction_arrays = {name: np.asarray(array) for name, array in predictions.items()}
+    probe_names = tuple(prediction_arrays)
+    metric_names = _metric_names(target_mode)
+    digest = hashlib.sha256()
+    score_rows: list[np.ndarray] = []
+
+    def scalar_scores(
+        sample_idx: np.ndarray,
+    ) -> Mapping[str, Mapping[str, float]] | None:
+        """Score one sample through the scalar compatibility path."""
+        try:
+            scores = {
+                probe_name: _score_predictions(
+                    y_array,
+                    probe_predictions,
+                    sample_idx,
+                    target_mode=target_mode,
+                    names=names,
+                )
+                for probe_name, probe_predictions in prediction_arrays.items()
+            }
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+        return scores if _finite_score_row(scores, metric_names=metric_names) else None
+
+    def record_scalar(sample_idx: np.ndarray) -> None:
+        """Record one sample through the scalar compatibility path."""
+        scores = scalar_scores(sample_idx)
+        if scores is None:
+            return
+        row = _score_row_array(
+            scores,
+            probe_names=probe_names,
+            metric_names=metric_names,
+        )
+        if row is None:
+            return
+        digest.update(sample_idx.tobytes())
+        score_rows.append(row)
+
+    resamples = _resample_stream(
+        y_array,
+        target_mode=target_mode,
+        requested=requested_resamples,
+        random_state=random_state,
+        groups=groups,
+    )
+    tensor_enabled = _canonical_tensor_inputs(
+        y_array,
+        prediction_arrays,
+        target_mode=target_mode,
+        names=names,
+    )
+    if not tensor_enabled:
+        for sample_idx in resamples:
+            record_scalar(sample_idx)
+    else:
+        for batch in _iter_resample_batches(
+            resamples,
+            n_rows=y_array.shape[0],
+            y_true=y_array,
+            predictions=prediction_arrays,
+            n_metrics=len(metric_names),
+            max_working_memory_mb=max_working_memory_mb,
+        ):
+            tensor_scores: np.ndarray | None = None
+            if batch.weights is not None:
+                try:
+                    candidate = _primary_metric_score_tensor(
+                        y_array,
+                        prediction_arrays,
+                        batch.weights,
+                        target_mode=target_mode,
+                        metrics=metric_names,
+                        names=names,
+                    )
+                    candidate_array = np.asarray(candidate, dtype=np.float64)
+                    expected_shape = (
+                        len(batch.indices),
+                        len(prediction_arrays),
+                        len(metric_names),
+                    )
+                    if candidate_array.shape == expected_shape:
+                        tensor_scores = candidate_array
+                except (MemoryError, TypeError, ValueError, IndexError, OverflowError):
+                    tensor_scores = None
+            if tensor_scores is None:
+                for sample_idx in batch.indices:
+                    record_scalar(sample_idx)
+                continue
+
+            finite_rows = np.all(np.isfinite(tensor_scores), axis=(1, 2))
+            for row_index, sample_idx in enumerate(batch.indices):
+                if bool(finite_rows[row_index]):
+                    digest.update(sample_idx.tobytes())
+                    score_rows.append(
+                        np.asarray(tensor_scores[row_index], dtype=np.float64)
+                    )
+                    continue
+                record_scalar(sample_idx)
+
+    used = len(score_rows)
+    if score_rows:
+        score_array = np.stack(score_rows, axis=0).astype(np.float64, copy=False)
+    else:
+        score_array = np.empty(
+            (0, len(probe_names), len(metric_names)),
+            dtype=np.float64,
+        )
+    minimum = max(50, requested_resamples // 2)
+    available = used >= minimum
+    return _PairedScoreCache(
+        scores=score_array,
+        probe_names=probe_names,
+        metric_names=metric_names,
+        status="available" if available else "unavailable",
+        reason=None if available else "too few valid paired bootstrap resamples",
+        resamples_requested=int(requested_resamples),
+        resamples_used=int(used),
+        resample_plan_id=digest.hexdigest()[:16] if used else None,
+    )
+
+
+def _summarize_cached_probe_pair(
+    cache: _PairedScoreCache,
+    first_probe: str,
+    second_probe: str,
+    *,
+    point_scores: Mapping[str, Mapping[str, float]],
+) -> dict[str, Any] | None:
+    """Summarize one oriented probe pair from a finite score cache."""
+    if cache.status != "available" or cache.resamples_used <= 0:
+        return None
+    try:
+        first_index = cache.probe_names.index(first_probe)
+        second_index = cache.probe_names.index(second_probe)
+    except ValueError:
+        return None
+    if cache.scores.ndim != 3 or cache.scores.shape[0] != cache.resamples_used:
+        return None
+    if cache.scores.shape[1] != len(cache.probe_names):
+        return None
+    if cache.scores.shape[2] != len(cache.metric_names):
+        return None
+    if not np.all(np.isfinite(cache.scores)):
+        return None
+    try:
+        first_points = point_scores[first_probe]
+        second_points = point_scores[second_probe]
+        metric_payload: dict[str, Any] = {}
+        differences = cache.scores[:, first_index, :] - cache.scores[:, second_index, :]
+        for metric_index, metric in enumerate(cache.metric_names):
+            point_delta = float(first_points[metric]) - float(second_points[metric])
+            values = np.asarray(differences[:, metric_index], dtype=float)
+            if not np.all(np.isfinite(values)) or not np.isfinite(point_delta):
+                return None
+            metric_payload[metric] = {
+                "point_delta": point_delta,
+                "mean_delta": float(np.mean(values)),
+                "paired_standard_error": float(np.std(values, ddof=1)),
+                "lower_95": float(np.percentile(values, 2.5)),
+                "upper_95": float(np.percentile(values, 97.5)),
+                "resamples_requested": int(cache.resamples_requested),
+                "resamples_used": int(cache.resamples_used),
+            }
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return {
+        "first_probe": first_probe,
+        "second_probe": second_probe,
+        "metrics": metric_payload,
+    }
 
 
 def _score_predictions(
@@ -489,145 +656,39 @@ def build_paired_probe_comparisons(
         if name in prediction_arrays
     ]
     pairs = list(combinations(ordered_names, 2))
-    metric_names = _metric_names(target_mode)
-    deltas: dict[tuple[str, str, str], list[float]] = {
-        (first, second, metric): []
-        for first, second in pairs
-        for metric in metric_names
-    }
-    y_array = np.asarray(y_true)
-    accumulator = _ComparisonAccumulator(deltas, hashlib.sha256())
-
-    def scalar_scores(
-        sample_idx: np.ndarray,
-    ) -> Mapping[str, Mapping[str, float]] | None:
-        """Score one sample through the compatibility path."""
-        try:
-            scores = {
-                probe_name: _score_predictions(
-                    y_array,
-                    predictions,
-                    sample_idx,
-                    target_mode=target_mode,
-                    names=names,
-                )
-                for probe_name, predictions in prediction_arrays.items()
-            }
-        except (TypeError, ValueError, IndexError, OverflowError):
-            return None
-        if not _finite_score_row(scores, metric_names=metric_names):
-            return None
-        return scores
-
-    def record_scalar(sample_idx: np.ndarray) -> None:
-        """Record one sample through the compatibility path."""
-        scores = scalar_scores(sample_idx)
-        if scores is None:
-            return
-        _record_resample_scores(
-            accumulator,
-            sample_idx,
-            scores,
-            pairs=pairs,
-            metric_names=metric_names,
-        )
-
-    tensor_enabled = _canonical_tensor_inputs(
-        y_array,
+    cache = _build_paired_score_cache(
+        np.asarray(y_true),
         prediction_arrays,
         target_mode=target_mode,
-        names=names,
-    )
-    resamples = _resample_stream(
-        y_array,
-        target_mode=target_mode,
-        requested=requested_resamples,
+        requested_resamples=requested_resamples,
         random_state=random_state,
         groups=groups,
+        names=names,
+        max_working_memory_mb=max_working_memory_mb,
     )
-    if not tensor_enabled:
-        for indices in resamples:
-            record_scalar(indices)
-    else:
-        probe_positions = {name: index for index, name in enumerate(prediction_arrays)}
-        tensor_predictions = prediction_arrays
-        for batch in _iter_resample_batches(
-            resamples,
-            n_rows=y_array.shape[0],
-            y_true=y_array,
-            predictions=tensor_predictions,
-            n_metrics=len(metric_names),
-            max_working_memory_mb=max_working_memory_mb,
-        ):
-            tensor_scores: np.ndarray | None = None
-            if batch.weights is not None:
-                try:
-                    candidate = _primary_metric_score_tensor(
-                        y_array,
-                        tensor_predictions,
-                        batch.weights,
-                        target_mode=target_mode,
-                        metrics=metric_names,
-                        names=names,
-                    )
-                    candidate_array = np.asarray(candidate, dtype=float)
-                    expected_shape = (
-                        len(batch.indices),
-                        len(tensor_predictions),
-                        len(metric_names),
-                    )
-                    if candidate_array.shape == expected_shape:
-                        tensor_scores = candidate_array
-                except (MemoryError, TypeError, ValueError, IndexError, OverflowError):
-                    tensor_scores = None
-            if tensor_scores is None:
-                for sample_idx in batch.indices:
-                    record_scalar(sample_idx)
-                continue
-            _record_tensor_batch_scores(
-                accumulator,
-                batch,
-                tensor_scores,
-                pairs=pairs,
-                metric_names=metric_names,
-                probe_positions=probe_positions,
-                scalar_fallback=scalar_scores,
-            )
-
-    minimum = max(50, requested_resamples // 2)
-    if accumulator.used < minimum:
+    if cache.status != "available":
         return {
             **base,
-            "resamples_used": accumulator.used,
-            "reason": "too few valid paired bootstrap resamples",
+            "resamples_used": cache.resamples_used,
+            "reason": cache.reason,
         }
 
     comparisons: dict[str, Any] = {}
     for first, second in pairs:
-        metric_payload: dict[str, Any] = {}
-        for metric in metric_names:
-            values = np.asarray(deltas[(first, second, metric)], dtype=float)
-            point_delta = float(probes[first][metric]) - float(probes[second][metric])
-            metric_payload[metric] = {
-                "point_delta": point_delta,
-                "mean_delta": float(np.mean(values)),
-                "paired_standard_error": float(np.std(values, ddof=1)),
-                "lower_95": float(np.percentile(values, 2.5)),
-                "upper_95": float(np.percentile(values, 97.5)),
-                "resamples_requested": int(requested_resamples),
-                "resamples_used": int(accumulator.used),
-            }
-        comparisons[f"{first}__vs__{second}"] = {
-            "first_probe": first,
-            "second_probe": second,
-            "metrics": metric_payload,
-        }
+        summary = _summarize_cached_probe_pair(
+            cache,
+            first,
+            second,
+            point_scores=probes,
+        )
+        if summary is not None:
+            comparisons[f"{first}__vs__{second}"] = summary
     return {
         **base,
         "status": "available",
         "reason": None,
-        "resamples_used": int(accumulator.used),
-        "resample_plan_id": accumulator.resample_digest.hexdigest()[:16],
+        "resamples_used": int(cache.resamples_used),
+        "resample_plan_id": cache.resample_plan_id,
         "comparisons": comparisons,
     }
 

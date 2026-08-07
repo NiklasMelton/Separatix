@@ -186,6 +186,22 @@ above dummy, and a practical paired gain over the strongest simpler probe for
 the required primary metrics. Failed or infeasible group splits never fall back
 to in-sample override evidence.
 
+MLP pairwise evidence uses one target-aware paired-bootstrap cache local to the
+MLP cohort. The ordinary-probe cache cannot be reused literally because MLP
+probes use their own capped, dense, aligned cohort. The local cache scores the
+selected best MLP, the dummy baseline, and the metric-specific strongest
+simpler comparator once, then retains only the comparisons needed for the
+override. All required simpler comparators are still evaluated and remain
+available under `report.metrics["mlp_probes"]["aligned_comparators"]`; pruning
+the retained pairwise summaries does not weaken the completeness gate. This
+optimization avoids repeated resampling and scoring, but MLP fitting remains
+the dominant optional cost and the optimization should not be read as a
+whole-diagnosis speed guarantee.
+
+The MLP payload's `pairwise_comparison_audit` records the cache status and
+resample plan. See [the report reference](docs/reports.md#optional-mlp-pairwise-audit)
+for its exact fields and grouped/class-support behavior.
+
 Optional persistent-topology diagnostics can be installed with:
 
 ```bash
