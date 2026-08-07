@@ -36,8 +36,9 @@ main fields are:
 - `minimum_recommended_family`: the simplest family supported by the ordinary
   conservative recommendation rule, or `null` when primary metrics disagree
 - `plausible_families`: the ordered, uncertainty-aware competitive frontier
-- `decision_method`: paired bootstrap, marginal-standard-error fallback, or
-  `mixed`
+- `decision_method`: `paired_oof_bootstrap`,
+  `marginal_standard_error_fallback`, `mixed`, or `null` when no eligible
+  pairwise comparison was needed
 - `assessments`: per-family availability, complexity eligibility, dominance,
   and inclusion reasons
 
@@ -57,7 +58,10 @@ not been clearly ruled out under the target-specific comparison policy?
 plan. `paired_probe_comparisons` contains probe-level paired bootstrap deltas;
 the target-specific recommendation evidence identifies whether each decision
 used that paired evidence or the marginal fallback. Full reports retain
-row-to-fold assignments for audits, while terse serialization prunes them.
+row-to-fold assignments for audits, while terse serialization prunes them. The
+paired comparisons are conditional on the best probe selected to represent each
+family; they do not adjust for selecting that representative from the same OOF
+evidence.
 
 The package compares simple families first and requires clear evidence before
 escalating. Geometry and topology support the explanation; they do not bypass a
@@ -109,18 +113,23 @@ estimator = make_probe_estimator(recipe)
 estimator.fit(X_train, y_train)
 ```
 
-The factory uses a fixed allowlist of Separatix probe components and returns an
-unfitted estimator. It never imports an arbitrary class named by serialized
-input. Its `version_policy` argument controls whether differences between the
-recorded and current Python/library environments warn, raise an error, or are
-ignored:
+The factory uses a fixed allowlist of supported scikit-learn and Separatix probe
+components and returns an unfitted estimator. It never imports an arbitrary
+class named by serialized input. Its `version_policy` argument controls whether
+differences between the recorded and current Python/library environments warn,
+raise an error, or are ignored:
 
 ```python
 estimator = make_probe_estimator(recipe, version_policy="error")
 ```
 
-A recipe describes the exact estimator construction and fit policy used by the
-diagnostic. It intentionally does not contain fitted coefficients, validation
-rows, or a claim of bit-for-bit reproducibility across library versions.
-Skipped probes expose an unavailable recipe status and a reason rather than a
-recipe for an estimator that was never constructed.
+A recipe describes the resolved unfitted estimator configuration and records
+the diagnostic's fit-policy metadata. The factory reconstructs estimator
+parameters, but it does not replay the evaluation cohort, validation split plan,
+or scoring-time orchestration. The training policy is audit metadata rather than
+instructions automatically applied by the factory. Consumers must inspect and
+honor any `training_policy.scoring_time_estimator_adjustments`, such as
+fold-local kNN neighbor reduction, when reproducing a diagnostic evaluation.
+Recipes do not contain fitted coefficients or claim bit-for-bit reproducibility
+across library versions. Skipped probes expose an unavailable recipe status and
+a reason rather than a recipe for an estimator that was never constructed.

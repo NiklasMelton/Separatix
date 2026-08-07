@@ -13,6 +13,11 @@ groups can therefore make supervised evaluation infeasible. In that case the
 affected evidence is skipped and reported; it is not replaced by a misleading
 in-sample result. Geometry and topology may remain as descriptive evidence.
 
+Ordinary core-probe comparisons also respect the independence unit. Their
+paired bootstrap resamples whole groups, rather than individual rows, and
+single-label resamples that lose required class support are rejected. The
+report records how many paired resamples were requested and successfully used.
+
 ## Sparse inputs
 
 Sparse feature matrices are accepted directly, and sparse-compatible operations

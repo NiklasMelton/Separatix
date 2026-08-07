@@ -48,6 +48,27 @@ print(report.scores)
 print(report.to_json())
 ```
 
+### Experimental protocol: diagnose twice
+
+When a final test set is reserved, run Separatix at the two training sizes that
+matter:
+
+1. Run it on the selection cohort before choosing and tuning candidate model
+   families against validation data.
+2. After validation-based comparison and tuning are complete, combine the
+   training and validation cohorts, rerun Separatix on that enlarged development
+   cohort, and record the second report before fitting the final model.
+
+The first report supports selection-time reasoning. The second is a
+final-fit-size diagnostic and may inform the final model specification when the
+apparent geometry changes with more training data. Neither run should receive
+test rows or test labels. Make every remaining decision before evaluating the
+final fitted model once on the untouched test set; that test is the independent
+assessment of the complete procedure.
+
+See the [two-stage experimental protocol](docs/quickstart.md#two-stage-experimental-protocol)
+for an example and interpretation guidance.
+
 ## What It Accepts
 
 - Dense NumPy arrays
@@ -97,10 +118,13 @@ recipe = report.metrics["probes"]["linear"]["probe_recipe"]
 estimator = make_probe_estimator(recipe)
 ```
 
-The factory only accepts known Separatix probe components; serialized recipes
-cannot request arbitrary imports. Skipped probes report why a recipe is
-unavailable instead of implying that an unconstructed estimator can be
-reproduced.
+The factory only accepts a fixed allowlist of supported scikit-learn and
+Separatix probe components; serialized recipes cannot request arbitrary imports.
+Skipped probes report why a recipe is unavailable instead of implying that an
+unconstructed estimator can be reproduced. The factory reconstructs the
+unfitted estimator configuration; it does not replay the diagnostic's row
+cohort, validation folds, or scoring orchestration. Those details remain
+separate report evidence.
 
 For multilabel targets, `separatix` compares probe families across micro F1,
 macro F1, and sample Jaccard rather than collapsing the evidence into a single
@@ -123,10 +147,11 @@ continue to describe the supplied, unscaled coordinate space, and the report
 records both choices under `preprocessing`.
 
 Ordinary probe families are evaluated on one shared row cohort and one shared
-held-out split plan. Family and dummy comparisons use paired bootstrap intervals
-over their aligned out-of-fold predictions. These intervals capture covariance
-between probe errors, but remain diagnostic resampling evidence rather than
-independent-test confidence intervals.
+held-out split plan. When aligned out-of-fold predictions are available, family
+and dummy comparisons use paired bootstrap intervals; affected comparisons fall
+back to marginal uncertainty when paired evidence is unavailable. The paired
+intervals capture covariance between probe errors, but remain diagnostic
+resampling evidence rather than independent-test confidence intervals.
 
 Optional feed-forward MLP probes can be installed and enabled explicitly:
 
@@ -241,9 +266,11 @@ The recommendation is produced by a fixed, inspectable pipeline:
 4. Run simple probe models and compare them to a dummy baseline.
 5. Build probe-family evidence with uncertainty estimates for `linear`,
    `smooth_nonlinear`, and `local_kernel`.
-6. Apply a 95% signal-vs-dummy gate before making any model-family
-   recommendation for single-label targets, or a two-of-three primary-metric
-   signal gate for multilabel targets.
+6. Apply an uncertainty-aware signal-vs-dummy gate before making any
+   model-family recommendation: balanced accuracy for single-label targets, two
+   of three primary metrics for multilabel targets, or at least one of the two
+   primary R2 summaries for regression. Use paired OOF evidence when available
+   and the documented marginal-uncertainty fallback otherwise.
 7. Use conservative escalation: keep the simpler family unless a more complex
    family has a clear uncertainty-adjusted advantage.
 8. Treat fragmentation and optional topology as supporting structural evidence,
