@@ -415,9 +415,7 @@ def _build_paired_score_cache(
     subsequent pair summary uses exactly the same accepted resamples.
     """
     y_array = np.asarray(y_true)
-    prediction_arrays = {
-        name: np.asarray(array) for name, array in predictions.items()
-    }
+    prediction_arrays = {name: np.asarray(array) for name, array in predictions.items()}
     probe_names = tuple(prediction_arrays)
     metric_names = _metric_names(target_mode)
     digest = hashlib.sha256()

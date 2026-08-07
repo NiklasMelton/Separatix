@@ -1740,8 +1740,7 @@ def _pairwise_unavailable_override_reason(
         detail = audit.get("reason")
         return (
             "Paired MLP resampling evidence was unavailable, so the override was "
-            "disabled."
-            + (f" {detail}" if detail else "")
+            "disabled." + (f" {detail}" if detail else "")
         )
     return fallback
 
@@ -1840,7 +1839,9 @@ def _mlp_pairwise_cached_comparisons(
     audit = _pairwise_comparison_audit(
         config,
         status="available" if cache_status == "available" else "unavailable",
-        reason=None if cache_status == "available" else str(cache_reason or "paired score cache was unavailable"),
+        reason=None
+        if cache_status == "available"
+        else str(cache_reason or "paired score cache was unavailable"),
         resamples_used=int(getattr(cache, "resamples_used", 0) or 0),
         resample_plan_id=getattr(cache, "resample_plan_id", None),
         comparators_by_metric=comparators_by_metric,
@@ -1879,11 +1880,14 @@ def _mlp_pairwise_cached_comparisons(
             if metric not in selected_metrics or not isinstance(item, Mapping):
                 continue
             retained = dict(item)
-            for key in ("paired_standard_error", "resamples_requested", "resamples_used"):
+            for key in (
+                "paired_standard_error",
+                "resamples_requested",
+                "resamples_used",
+            ):
                 retained.pop(key, None)
             retained["clear_advantage"] = bool(
-                float(retained.get("point_delta", 0.0))
-                >= config.mlp_min_improvement
+                float(retained.get("point_delta", 0.0)) >= config.mlp_min_improvement
                 and float(retained.get("lower_95", 0.0)) > 0.0
             )
             pairwise[comparator] = retained
@@ -1896,11 +1900,14 @@ def _mlp_pairwise_cached_comparisons(
             if not isinstance(item, Mapping):
                 continue
             retained = dict(item)
-            for key in ("paired_standard_error", "resamples_requested", "resamples_used"):
+            for key in (
+                "paired_standard_error",
+                "resamples_requested",
+                "resamples_used",
+            ):
                 retained.pop(key, None)
             retained["clear_advantage"] = bool(
-                float(retained.get("point_delta", 0.0))
-                >= config.mlp_min_improvement
+                float(retained.get("point_delta", 0.0)) >= config.mlp_min_improvement
                 and float(retained.get("lower_95", 0.0)) > 0.0
             )
             retained_metrics[metric] = retained
