@@ -97,6 +97,76 @@ Optional MLP probes are outside this summary. The summary is descriptive
 metadata for one run, not an implemented learning curve or size-sensitivity
 analysis.
 
+## Optional MLP pairwise audit
+
+When `mlp_probes=True` reaches the MLP path, inspect
+`report.metrics["mlp_probes"]`. The required aligned comparator results remain
+under `aligned_comparators`: `dummy`, `linear`, `smooth_poly`, `knn`, and
+`kernel_approx`. They are still fitted and evaluated on the MLP cohort (or
+marked unavailable/failed by the existing memory and runtime handling), and
+`required_comparators_complete` still requires complete held-out evidence for
+all five. The optimization only limits the retained pairwise summaries: the
+report keeps the selected best MLP versus `dummy` and versus the
+metric-specific strongest simpler comparator. A simpler comparator can
+therefore remain visible in `aligned_comparators` without appearing in
+`pairwise_comparisons`.
+
+MLP probes use one target-aware paired-bootstrap score cache for those retained
+pairs. The ordinary-probe cache cannot be reused literally because MLP probes
+run on a separately capped, dense, aligned cohort. The cache scores all
+probes needed by the retained pairs once, so repeated MLP-vs-comparator
+resampling and scoring are avoided. This is a comparison-overhead optimization;
+training the MLP architectures remains the dominant optional cost and this
+metadata does not promise that a complete `diagnose` call is faster.
+
+`pairwise_comparison_audit` has this fixed JSON-serializable schema:
+
+```python
+{
+    "status": "available" | "unavailable" | "not_run",
+    "method": "paired_oof_bootstrap",
+    "scope": "dummy_and_metric_strongest_simpler",
+    "resamples_requested": int,
+    "resamples_used": int,
+    "resample_plan_id": str | None,
+    "comparators_by_metric": {
+        "<primary metric>": {
+            "dummy": "dummy",
+            "strongest_simpler": "<comparator>" | None,
+        },
+    },
+    "reason": str | None,
+}
+```
+
+`method` and `scope` are constant labels. `resamples_requested` follows the
+budget (200, 500, or 1,000 for `fast`, `standard`, or `extended`), while
+`resamples_used` counts finite paired rows retained by the MLP-local cache.
+`resample_plan_id` identifies the accepted target-aware resample stream and is
+`None` when no accepted rows are available. `comparators_by_metric` names the
+dummy and the point-strongest simpler comparator for every primary metric;
+`strongest_simpler` is `None` when no complete candidate is available.
+
+The statuses distinguish why paired evidence is absent:
+
+- `available`: the cache retained enough valid paired resamples and the
+  requested summaries were produced. `reason` is normally `None`.
+- `unavailable`: paired evidence was requested but could not be used, for
+  example because the optional backend, aligned predictions, or enough finite
+  resamples were unavailable. `reason` describes the failure and the override
+  is disabled when paired evidence is required.
+- `not_run`: the MLP path did not reach paired comparison, such as when MLPs
+  were disabled, the skill trigger did not fire, support-preserving sampling or
+  held-out splitting was infeasible, or no architecture completed.
+
+With `groups`, the MLP cohort is sampled without splitting groups and its
+held-out folds are group-disjoint. The paired cache resamples whole groups;
+single-label resamples that lose required class support are rejected, and rows
+with non-finite target-aware scores are also discarded. If too few valid rows
+remain, the audit is `unavailable`; a missing support-preserving split is
+`not_run`. No grouped or class-support failure falls back to in-sample override
+evidence.
+
 The package compares simple families first and requires clear evidence before
 escalating. Geometry and topology support the explanation; they do not bypass a
 weak predictive-signal gate.

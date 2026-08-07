@@ -7,7 +7,7 @@ from __future__ import annotations
 import importlib
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from importlib.util import find_spec
@@ -29,7 +29,10 @@ from separatix.densify import (
     ensure_dense_or_sample,
     ensure_dense_or_sample_regression,
 )
-from separatix.models.comparison import bootstrap_comparison as _bootstrap_comparison
+from separatix.models.comparison import (
+    _build_paired_score_cache,
+    _summarize_cached_probe_pair,
+)
 from separatix.models.probes import (
     _choose_sketch_components,
     _dense_multilabel_matrix,
@@ -169,6 +172,49 @@ def _mlp_training_policy(estimator: Any) -> dict[str, Any]:
     return policy
 
 
+def _pairwise_comparison_audit(
+    config: ProfilerConfig,
+    *,
+    status: Literal["available", "unavailable", "not_run"] = "not_run",
+    reason: str | None = None,
+    resamples_used: int = 0,
+    resample_plan_id: str | None = None,
+    comparators_by_metric: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the compact audit record for MLP paired comparisons.
+
+    MLP comparisons run on a capped, dense cohort that is intentionally
+    independent from the ordinary probe-comparison cache.  Keep this metadata
+    explicit so a report can distinguish an unavailable paired comparison from
+    one that simply was not requested (or was not triggered).
+    """
+    return {
+        "status": status,
+        "method": "paired_oof_bootstrap",
+        "scope": "dummy_and_metric_strongest_simpler",
+        "resamples_requested": int(_MLP_BUDGETS[config.budget]["bootstrap_repeats"]),
+        "resamples_used": int(resamples_used),
+        "resample_plan_id": resample_plan_id,
+        "comparators_by_metric": dict(comparators_by_metric or {}),
+        "reason": reason,
+    }
+
+
+def _set_pairwise_audit(
+    payload: dict[str, Any],
+    config: ProfilerConfig,
+    *,
+    status: Literal["available", "unavailable", "not_run"],
+    reason: str | None,
+) -> None:
+    """Set paired-comparison audit metadata on an in-progress MLP payload."""
+    payload["pairwise_comparison_audit"] = _pairwise_comparison_audit(
+        config,
+        status=status,
+        reason=reason,
+    )
+
+
 def _torch_module() -> Any | None:
     """Return a usable torch installation, otherwise None."""
     try:
@@ -212,6 +258,15 @@ def _default_mlp_artifacts(config: ProfilerConfig) -> dict[str, Any]:
         "aligned_comparators": {},
         "best_architecture": None,
         "pairwise_comparisons": {},
+        "pairwise_comparison_audit": _pairwise_comparison_audit(
+            config,
+            status="not_run",
+            reason=(
+                "MLP paired comparisons were not run because MLP probes were disabled."
+                if not config.mlp_probes
+                else "MLP paired comparisons have not been run."
+            ),
+        ),
         "required_comparators_complete": False,
         "architectures_complete": None,
         "recommendation_override": False,
@@ -1674,6 +1729,189 @@ def _failed_override_reason(
     return "The MLP override criteria were not satisfied."
 
 
+def _pairwise_unavailable_override_reason(
+    *,
+    required_complete: bool,
+    audit: Mapping[str, Any],
+    fallback: str,
+) -> str:
+    """Prefer an explicit paired-resampling failure over a misleading gate reason."""
+    if required_complete and audit.get("status") == "unavailable":
+        detail = audit.get("reason")
+        return (
+            "Paired MLP resampling evidence was unavailable, so the override was "
+            "disabled."
+            + (f" {detail}" if detail else "")
+        )
+    return fallback
+
+
+def _mlp_pairwise_cached_comparisons(
+    *,
+    best_name: str,
+    best_result: Mapping[str, Any],
+    comparator_results: Mapping[str, Mapping[str, Any]],
+    y_true: np.ndarray,
+    target_mode: Literal["singlelabel", "multilabel", "regression"],
+    metrics: tuple[str, ...],
+    config: ProfilerConfig,
+    groups: np.ndarray | None,
+    names: np.ndarray | None,
+    strongest: Mapping[str, str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build retained MLP pairwise intervals from one target-aware score cache.
+
+    The MLP cohort is capped and aligned independently of the ordinary probe
+    cohort.  The best MLP, dummy baseline, and union of metric-specific
+    strongest simpler predictions are supplied to one cache so every retained
+    comparison uses exactly the same paired resampling plan; only the dummy
+    baseline and metric-specific strongest simpler probe are retained in the
+    report payload.
+    """
+    requested = int(_mlp_budget(config)["bootstrap_repeats"])
+    comparators_by_metric = {
+        metric: {
+            "dummy": "dummy",
+            "strongest_simpler": strongest.get(metric),
+        }
+        for metric in metrics
+    }
+    prediction_arrays: dict[str, np.ndarray] = {}
+    point_scores: dict[str, Mapping[str, Any]] = {best_name: best_result}
+    best_predictions = best_result.get("predictions")
+    if best_predictions is not None:
+        best_array = np.asarray(best_predictions)
+        if best_array.shape[0] == y_true.shape[0]:
+            prediction_arrays[best_name] = best_array
+    # The cache need only contain probes that feed a retained comparison.  The
+    # required-comparator completeness gate is evaluated separately, so a
+    # missing required comparator cannot force unrelated cached scores to be
+    # fabricated or retained.
+    cache_comparator_names = {
+        "dummy",
+        *(name for name in strongest.values() if name is not None),
+    }
+    for name, result in comparator_results.items():
+        if name not in cache_comparator_names:
+            continue
+        predictions = result.get("predictions")
+        if predictions is None:
+            continue
+        array = np.asarray(predictions)
+        if array.shape[0] != y_true.shape[0]:
+            continue
+        # Keep point scores alongside every prediction array.  The shared
+        # summarizer uses these values for point deltas while the cache stores
+        # only resample scores.
+        prediction_arrays[name] = array
+        point_scores[name] = result
+
+    if best_name not in prediction_arrays or "dummy" not in prediction_arrays:
+        audit = _pairwise_comparison_audit(
+            config,
+            status="unavailable",
+            reason="best MLP and dummy predictions were not both aligned on the MLP cohort",
+            comparators_by_metric=comparators_by_metric,
+        )
+        return {}, audit
+
+    try:
+        cache = _build_paired_score_cache(
+            np.asarray(y_true),
+            prediction_arrays,
+            target_mode=target_mode,
+            requested_resamples=requested,
+            random_state=config.random_state,
+            groups=groups,
+            names=names,
+            max_working_memory_mb=float(config.max_dense_mb),
+        )
+    except Exception as exc:  # cache failures must not mask recommendation evidence
+        audit = _pairwise_comparison_audit(
+            config,
+            status="unavailable",
+            reason=f"MLP paired score cache failed: {type(exc).__name__}: {exc}",
+            comparators_by_metric=comparators_by_metric,
+        )
+        return {}, audit
+
+    cache_status = str(getattr(cache, "status", "unavailable"))
+    cache_reason = getattr(cache, "reason", None)
+    audit = _pairwise_comparison_audit(
+        config,
+        status="available" if cache_status == "available" else "unavailable",
+        reason=None if cache_status == "available" else str(cache_reason or "paired score cache was unavailable"),
+        resamples_used=int(getattr(cache, "resamples_used", 0) or 0),
+        resample_plan_id=getattr(cache, "resample_plan_id", None),
+        comparators_by_metric=comparators_by_metric,
+    )
+    if cache_status != "available":
+        return {}, audit
+
+    pairwise: dict[str, Any] = {}
+    # Preserve only the comparisons needed for the override decision.  A
+    # comparator can be strongest for more than one metric; each such metric is
+    # retained beneath the same comparator key.
+    selected: dict[str, set[str]] = {"dummy": set(metrics)}
+    for metric, comparator in strongest.items():
+        if comparator is not None:
+            selected.setdefault(comparator, set()).add(metric)
+    for comparator, selected_metrics in selected.items():
+        if comparator not in prediction_arrays:
+            continue
+        try:
+            summary = _summarize_cached_probe_pair(
+                cache,
+                best_name,
+                comparator,
+                point_scores=point_scores,
+            )
+        except Exception:
+            summary = None
+        if not isinstance(summary, Mapping):
+            continue
+        metric_payload = summary.get("metrics", {})
+        if not isinstance(metric_payload, Mapping):
+            continue
+        if target_mode == "singlelabel":
+            metric = "balanced_accuracy"
+            item = metric_payload.get(metric)
+            if metric not in selected_metrics or not isinstance(item, Mapping):
+                continue
+            retained = dict(item)
+            for key in ("paired_standard_error", "resamples_requested", "resamples_used"):
+                retained.pop(key, None)
+            retained["clear_advantage"] = bool(
+                float(retained.get("point_delta", 0.0))
+                >= config.mlp_min_improvement
+                and float(retained.get("lower_95", 0.0)) > 0.0
+            )
+            pairwise[comparator] = retained
+            continue
+        retained_metrics: dict[str, Any] = {}
+        for metric in metrics:
+            if metric not in selected_metrics:
+                continue
+            item = metric_payload.get(metric)
+            if not isinstance(item, Mapping):
+                continue
+            retained = dict(item)
+            for key in ("paired_standard_error", "resamples_requested", "resamples_used"):
+                retained.pop(key, None)
+            retained["clear_advantage"] = bool(
+                float(retained.get("point_delta", 0.0))
+                >= config.mlp_min_improvement
+                and float(retained.get("lower_95", 0.0)) > 0.0
+            )
+            retained_metrics[metric] = retained
+        if retained_metrics:
+            pairwise[comparator] = retained_metrics
+    if not pairwise:
+        audit["status"] = "unavailable"
+        audit["reason"] = "No retained paired MLP comparison summaries were available."
+    return pairwise, audit
+
+
 def _singlelabel_override_evidence(
     mlp_results: dict[str, dict[str, Any]],
     comparator_results: dict[str, dict[str, Any]],
@@ -1709,6 +1947,11 @@ def _singlelabel_override_evidence(
                 "No MLP architecture produced complete aligned held-out evidence."
             ),
             "pairwise_comparisons": {},
+            "pairwise_comparison_audit": _pairwise_comparison_audit(
+                config,
+                status="not_run",
+                reason="No MLP architecture produced complete aligned held-out evidence.",
+            ),
             "best_architecture": None,
             "required_comparators_complete": required_complete,
             "architectures_complete": False,
@@ -1723,40 +1966,18 @@ def _singlelabel_override_evidence(
                 absolute_skill={},
             ),
         }
-    pairwise: dict[str, Any] = {}
-    best_predictions = np.asarray(best_result["predictions"], dtype=int)
-    for name, result in comparator_results.items():
-        if "predictions" not in result or "balanced_accuracy" not in result:
-            continue
-        comparator_predictions = np.asarray(result["predictions"], dtype=int)
-        if comparator_predictions.shape[0] != y_true.shape[0]:
-            continue
-
-        def delta(
-            sample_idx: np.ndarray, second: np.ndarray = comparator_predictions
-        ) -> float:
-            return _balanced_accuracy_delta(
-                y_true,
-                best_predictions,
-                second,
-                sample_idx,
-            )
-
-        comparison = _bootstrap_comparison(
-            delta,
-            repeats=_mlp_budget(config)["bootstrap_repeats"],
-            random_state=config.random_state,
-            n_rows=y_true.shape[0],
-            groups=groups,
-        )
-        comparison["point_delta"] = float(best_result["balanced_accuracy"]) - float(
-            result["balanced_accuracy"]
-        )
-        comparison["clear_advantage"] = bool(
-            comparison["point_delta"] >= config.mlp_min_improvement
-            and comparison["lower_95"] > 0.0
-        )
-        pairwise[name] = comparison
+    pairwise, pairwise_audit = _mlp_pairwise_cached_comparisons(
+        best_name=best_name,
+        best_result=best_result,
+        comparator_results=comparator_results,
+        y_true=y_true,
+        target_mode="singlelabel",
+        metrics=metric_names,
+        config=config,
+        groups=groups,
+        names=None,
+        strongest=strongest,
+    )
     beating_strongest = [
         metric
         for metric, comparator in strongest.items()
@@ -1774,22 +1995,29 @@ def _singlelabel_override_evidence(
         metrics=metric_names,
     )
     override = bool(required_complete and len(clearing) >= required_metrics)
+    override_reason = (
+        "The best MLP architecture showed paired signal above dummy and clearly "
+        "improved over the strongest aligned simpler probe."
+        if override
+        else _failed_override_reason(
+            missing_comparators=missing_comparators,
+            beating_strongest=beating_strongest,
+            beating_dummy=beating_dummy,
+            clearing=clearing,
+            required_metrics=required_metrics,
+        )
+    )
+    override_reason = _pairwise_unavailable_override_reason(
+        required_complete=required_complete,
+        audit=pairwise_audit,
+        fallback=override_reason,
+    )
     return {
         "status": "completed",
         "recommendation_override": override,
-        "override_reason": (
-            "The best MLP architecture showed paired signal above dummy and clearly "
-            "improved over the strongest aligned simpler probe."
-            if override
-            else _failed_override_reason(
-                missing_comparators=missing_comparators,
-                beating_strongest=beating_strongest,
-                beating_dummy=beating_dummy,
-                clearing=clearing,
-                required_metrics=required_metrics,
-            )
-        ),
+        "override_reason": override_reason,
         "pairwise_comparisons": pairwise,
+        "pairwise_comparison_audit": pairwise_audit,
         "best_architecture": {
             "probe_name": best_name,
             "balanced_accuracy": float(best_result["balanced_accuracy"]),
@@ -1851,6 +2079,11 @@ def _multilabel_override_evidence(
                 "No MLP architecture produced complete aligned held-out evidence."
             ),
             "pairwise_comparisons": {},
+            "pairwise_comparison_audit": _pairwise_comparison_audit(
+                config,
+                status="not_run",
+                reason="No MLP architecture produced complete aligned held-out evidence.",
+            ),
             "best_architecture": None,
             "required_comparators_complete": required_complete,
             "architectures_complete": False,
@@ -1865,49 +2098,18 @@ def _multilabel_override_evidence(
                 absolute_skill={},
             ),
         }
-    pairwise: dict[str, Any] = {}
-    best_predictions = np.asarray(best_result["predictions"], dtype=np.int8)
-    for name, result in comparator_results.items():
-        if "predictions" not in result:
-            continue
-        comparator_predictions = np.asarray(result["predictions"], dtype=np.int8)
-        if comparator_predictions.shape[0] != Y_true.shape[0]:
-            continue
-        metric_comparisons: dict[str, Any] = {}
-        for metric in metric_names:
-            if metric not in result:
-                continue
-
-            def delta(
-                sample_idx: np.ndarray,
-                metric_name: str = metric,
-                second: np.ndarray = comparator_predictions,
-            ) -> float:
-                return _multilabel_metric_delta(
-                    Y_true,
-                    best_predictions,
-                    second,
-                    sample_idx,
-                    metric=metric_name,
-                    label_names=label_names,
-                )
-
-            comparison = _bootstrap_comparison(
-                delta,
-                repeats=_mlp_budget(config)["bootstrap_repeats"],
-                random_state=config.random_state,
-                n_rows=Y_true.shape[0],
-                groups=groups,
-            )
-            comparison["point_delta"] = float(best_result[metric]) - float(
-                result[metric]
-            )
-            comparison["clear_advantage"] = bool(
-                comparison["point_delta"] >= config.mlp_min_improvement
-                and comparison["lower_95"] > 0.0
-            )
-            metric_comparisons[metric] = comparison
-        pairwise[name] = metric_comparisons
+    pairwise, pairwise_audit = _mlp_pairwise_cached_comparisons(
+        best_name=best_name,
+        best_result=best_result,
+        comparator_results=comparator_results,
+        y_true=Y_true,
+        target_mode="multilabel",
+        metrics=metric_names,
+        config=config,
+        groups=groups,
+        names=label_names,
+        strongest=strongest,
+    )
     beating_strongest = [
         metric
         for metric, comparator in strongest.items()
@@ -1929,23 +2131,30 @@ def _multilabel_override_evidence(
         metrics=metric_names,
     )
     override = bool(required_complete and len(clearing) >= required_metrics)
+    override_reason = (
+        "The best MLP architecture showed paired signal above dummy and clearly "
+        "improved over the strongest aligned simpler probe on at least two "
+        "primary multilabel metrics."
+        if override
+        else _failed_override_reason(
+            missing_comparators=missing_comparators,
+            beating_strongest=beating_strongest,
+            beating_dummy=beating_dummy,
+            clearing=clearing,
+            required_metrics=required_metrics,
+        )
+    )
+    override_reason = _pairwise_unavailable_override_reason(
+        required_complete=required_complete,
+        audit=pairwise_audit,
+        fallback=override_reason,
+    )
     return {
         "status": "completed",
         "recommendation_override": override,
-        "override_reason": (
-            "The best MLP architecture showed paired signal above dummy and clearly "
-            "improved over the strongest aligned simpler probe on at least two "
-            "primary multilabel metrics."
-            if override
-            else _failed_override_reason(
-                missing_comparators=missing_comparators,
-                beating_strongest=beating_strongest,
-                beating_dummy=beating_dummy,
-                clearing=clearing,
-                required_metrics=required_metrics,
-            )
-        ),
+        "override_reason": override_reason,
         "pairwise_comparisons": pairwise,
+        "pairwise_comparison_audit": pairwise_audit,
         "best_architecture": {
             "probe_name": best_name,
             "micro_f1": float(best_result["micro_f1"]),
@@ -2008,6 +2217,11 @@ def _regression_override_evidence(
                 "No MLP architecture produced complete aligned held-out evidence."
             ),
             "pairwise_comparisons": {},
+            "pairwise_comparison_audit": _pairwise_comparison_audit(
+                config,
+                status="not_run",
+                reason="No MLP architecture produced complete aligned held-out evidence.",
+            ),
             "best_architecture": None,
             "required_comparators_complete": required_complete,
             "architectures_complete": False,
@@ -2022,49 +2236,18 @@ def _regression_override_evidence(
                 absolute_skill={},
             ),
         }
-    pairwise: dict[str, Any] = {}
-    best_predictions = np.asarray(best_result["predictions"], dtype=float)
-    for name, result in comparator_results.items():
-        if "predictions" not in result:
-            continue
-        comparator_predictions = np.asarray(result["predictions"], dtype=float)
-        if comparator_predictions.shape[0] != Y_true.shape[0]:
-            continue
-        metric_comparisons: dict[str, Any] = {}
-        for metric in metric_names:
-            if metric not in result:
-                continue
-
-            def delta(
-                sample_idx: np.ndarray,
-                metric_name: str = metric,
-                second: np.ndarray = comparator_predictions,
-            ) -> float:
-                return _regression_metric_delta(
-                    Y_true,
-                    best_predictions,
-                    second,
-                    sample_idx,
-                    metric=metric_name,
-                    target_names=target_names,
-                )
-
-            comparison = _bootstrap_comparison(
-                delta,
-                repeats=_mlp_budget(config)["bootstrap_repeats"],
-                random_state=config.random_state,
-                n_rows=Y_true.shape[0],
-                groups=groups,
-            )
-            comparison["point_delta"] = float(best_result[metric]) - float(
-                result[metric]
-            )
-            comparison["clear_advantage"] = bool(
-                comparison["point_delta"] >= config.mlp_min_improvement
-                and comparison["lower_95"] > 0.0
-            )
-            metric_comparisons[metric] = comparison
-        pairwise[name] = metric_comparisons
+    pairwise, pairwise_audit = _mlp_pairwise_cached_comparisons(
+        best_name=best_name,
+        best_result=best_result,
+        comparator_results=comparator_results,
+        y_true=Y_true,
+        target_mode="regression",
+        metrics=metric_names,
+        config=config,
+        groups=groups,
+        names=target_names,
+        strongest=strongest,
+    )
     beating_strongest = [
         metric
         for metric, comparator in strongest.items()
@@ -2086,23 +2269,30 @@ def _regression_override_evidence(
         metrics=metric_names,
     )
     override = bool(required_complete and len(clearing) >= required_metrics)
+    override_reason = (
+        "The best MLP architecture showed paired signal above dummy and clearly "
+        "improved over the strongest aligned simpler regressor on both primary "
+        "R2 metrics."
+        if override
+        else _failed_override_reason(
+            missing_comparators=missing_comparators,
+            beating_strongest=beating_strongest,
+            beating_dummy=beating_dummy,
+            clearing=clearing,
+            required_metrics=required_metrics,
+        )
+    )
+    override_reason = _pairwise_unavailable_override_reason(
+        required_complete=required_complete,
+        audit=pairwise_audit,
+        fallback=override_reason,
+    )
     return {
         "status": "completed",
         "recommendation_override": override,
-        "override_reason": (
-            "The best MLP architecture showed paired signal above dummy and clearly "
-            "improved over the strongest aligned simpler regressor on both primary "
-            "R2 metrics."
-            if override
-            else _failed_override_reason(
-                missing_comparators=missing_comparators,
-                beating_strongest=beating_strongest,
-                beating_dummy=beating_dummy,
-                clearing=clearing,
-                required_metrics=required_metrics,
-            )
-        ),
+        "override_reason": override_reason,
         "pairwise_comparisons": pairwise,
+        "pairwise_comparison_audit": pairwise_audit,
         "best_architecture": {
             "probe_name": best_name,
             "r2_variance_weighted": float(best_result["r2_variance_weighted"]),
@@ -2200,6 +2390,11 @@ def maybe_run_singlelabel_mlp_probes(
     if torch is None:
         payload["status"] = "dependency_unavailable"
         payload["reason"] = "MLP probes require the optional torch extra."
+        payload["pairwise_comparison_audit"] = _pairwise_comparison_audit(
+            config,
+            status="unavailable",
+            reason=payload["reason"],
+        )
         report_context.setdefault("skipped_diagnostics", []).append(
             {
                 "name": "mlp_probes",
@@ -2238,6 +2433,12 @@ def maybe_run_singlelabel_mlp_probes(
     if sample_info.get("support_preserved") is False:
         payload["status"] = "skipped"
         payload["reason"] = sample_info.get("skip_reason")
+        _set_pairwise_audit(
+            payload,
+            config,
+            status="not_run",
+            reason=str(payload["reason"] or "MLP cohort support was not preserved."),
+        )
         payload["sample_info"] = sample_info
         report_context.setdefault("skipped_diagnostics", []).append(
             {
@@ -2260,6 +2461,7 @@ def maybe_run_singlelabel_mlp_probes(
     if dense_info["skipped"]:
         payload["status"] = "skipped"
         payload["reason"] = "Dense conversion unavailable under the current policy."
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         return payload
     dense_X = np.asarray(dense_info["X"], dtype=np.float32)
@@ -2275,6 +2477,7 @@ def maybe_run_singlelabel_mlp_probes(
         payload["reason"] = (
             "No MLP architecture fit within the configured parameter budget."
         )
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         return payload
     splits, evaluation_mode = _split_rows(
@@ -2290,6 +2493,7 @@ def maybe_run_singlelabel_mlp_probes(
         payload["reason"] = (
             "MLP override requires a valid held-out split; no such split was available."
         )
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         report_context.setdefault("skipped_diagnostics", []).append(
             {
@@ -2491,6 +2695,11 @@ def maybe_run_multilabel_mlp_probes(
     if torch is None:
         payload["status"] = "dependency_unavailable"
         payload["reason"] = "MLP probes require the optional torch extra."
+        payload["pairwise_comparison_audit"] = _pairwise_comparison_audit(
+            config,
+            status="unavailable",
+            reason=payload["reason"],
+        )
         report_context.setdefault("skipped_diagnostics", []).append(
             {
                 "name": "multilabel_mlp_probes",
@@ -2529,6 +2738,12 @@ def maybe_run_multilabel_mlp_probes(
     if sample_info.get("support_preserved") is False:
         payload["status"] = "skipped"
         payload["reason"] = sample_info.get("skip_reason")
+        _set_pairwise_audit(
+            payload,
+            config,
+            status="not_run",
+            reason=str(payload["reason"] or "MLP cohort support was not preserved."),
+        )
         payload["sample_info"] = sample_info
         report_context.setdefault("skipped_diagnostics", []).append(
             {
@@ -2554,6 +2769,7 @@ def maybe_run_multilabel_mlp_probes(
     if target_info["skipped"]:
         payload["status"] = "skipped"
         payload["reason"] = "Multilabel target exceeds the dense-memory budget."
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         return payload
     X_used = target_info["X"]
@@ -2570,6 +2786,7 @@ def maybe_run_multilabel_mlp_probes(
     if dense_info["skipped"]:
         payload["status"] = "skipped"
         payload["reason"] = "Dense conversion unavailable under the current policy."
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         return payload
     dense_X = np.asarray(dense_info["X"], dtype=np.float32)
@@ -2585,6 +2802,7 @@ def maybe_run_multilabel_mlp_probes(
         payload["reason"] = (
             "No MLP architecture fit within the configured parameter budget."
         )
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         return payload
     splits, evaluation_mode = _split_rows(
@@ -2600,6 +2818,7 @@ def maybe_run_multilabel_mlp_probes(
         payload["reason"] = (
             "MLP override requires a valid held-out split; no such split was available."
         )
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         report_context.setdefault("skipped_diagnostics", []).append(
             {
@@ -2805,6 +3024,11 @@ def maybe_run_regression_mlp_probes(
     if torch is None:
         payload["status"] = "dependency_unavailable"
         payload["reason"] = "MLP probes require the optional torch extra."
+        payload["pairwise_comparison_audit"] = _pairwise_comparison_audit(
+            config,
+            status="unavailable",
+            reason=payload["reason"],
+        )
         report_context.setdefault("skipped_diagnostics", []).append(
             {
                 "name": "regression_mlp_probes",
@@ -2843,6 +3067,12 @@ def maybe_run_regression_mlp_probes(
     if sample_info.get("support_preserved") is False:
         payload["status"] = "skipped"
         payload["reason"] = sample_info.get("skip_reason")
+        _set_pairwise_audit(
+            payload,
+            config,
+            status="not_run",
+            reason=str(payload["reason"] or "MLP cohort support was not preserved."),
+        )
         payload["sample_info"] = sample_info
         report_context.setdefault("skipped_diagnostics", []).append(
             {
@@ -2868,6 +3098,7 @@ def maybe_run_regression_mlp_probes(
     if dense_info["skipped"]:
         payload["status"] = "skipped"
         payload["reason"] = "Dense conversion unavailable under the current policy."
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         return payload
     dense_X = np.asarray(dense_info["X"], dtype=np.float32)
@@ -2885,6 +3116,7 @@ def maybe_run_regression_mlp_probes(
         payload["reason"] = (
             "No MLP architecture fit within the configured parameter budget."
         )
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         return payload
     splits, evaluation_mode = _split_rows(
@@ -2900,6 +3132,7 @@ def maybe_run_regression_mlp_probes(
         payload["reason"] = (
             "MLP override requires a valid held-out split; no such split was available."
         )
+        _set_pairwise_audit(payload, config, status="not_run", reason=payload["reason"])
         payload["sample_info"] = sample_info
         report_context.setdefault("skipped_diagnostics", []).append(
             {

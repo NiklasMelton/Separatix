@@ -52,6 +52,19 @@ def test_default_report_marks_mlp_not_requested() -> None:
     assert evidence["override_policy"] == "paired_improvement_and_dummy_signal"
     assert evidence["trigger_threshold_used_for_override"] is False
     assert evidence["minimum_improvement"] == 0.02
+    audit = report.metrics["mlp_probes"]["pairwise_comparison_audit"]
+    assert audit == {
+        "status": "not_run",
+        "method": "paired_oof_bootstrap",
+        "scope": "dummy_and_metric_strongest_simpler",
+        "resamples_requested": 500,
+        "resamples_used": 0,
+        "resample_plan_id": None,
+        "comparators_by_metric": {},
+        "reason": (
+            "MLP paired comparisons were not run because MLP probes were disabled."
+        ),
+    }
 
 
 def test_good_simple_probe_prevents_mlp_trigger_even_when_requested() -> None:
@@ -60,6 +73,13 @@ def test_good_simple_probe_prevents_mlp_trigger_even_when_requested() -> None:
 
     assert report.metrics["mlp_probes"]["status"] == "not_triggered"
     assert report.metrics["mlp_trigger_evidence"]["good_enough"] is True
+    audit = report.metrics["mlp_probes"]["pairwise_comparison_audit"]
+    assert audit["status"] == "not_run"
+    assert audit["method"] == "paired_oof_bootstrap"
+    assert audit["scope"] == "dummy_and_metric_strongest_simpler"
+    assert audit["resamples_used"] == 0
+    assert audit["resample_plan_id"] is None
+    assert audit["comparators_by_metric"] == {}
 
 
 def test_missing_torch_is_reported_only_after_mlp_trigger(
@@ -101,6 +121,15 @@ def test_missing_torch_is_reported_only_after_mlp_trigger(
 
     assert result["trigger"]["status"] == "triggered"
     assert result["status"] == "dependency_unavailable"
+    audit = result["pairwise_comparison_audit"]
+    assert audit["status"] == "unavailable"
+    assert audit["method"] == "paired_oof_bootstrap"
+    assert audit["scope"] == "dummy_and_metric_strongest_simpler"
+    assert audit["resamples_requested"] == 500
+    assert audit["resamples_used"] == 0
+    assert audit["resample_plan_id"] is None
+    assert audit["comparators_by_metric"] == {}
+    assert "optional torch" in audit["reason"]
 
 
 def test_singlelabel_recommendation_can_be_overridden_by_mlp_evidence() -> None:
@@ -228,6 +257,8 @@ def test_mlp_override_is_skipped_without_held_out_split(monkeypatch) -> None:
     assert result["status"] == "skipped"
     assert "held-out" in result["reason"]
     assert result["recommendation_override"] is False
+    assert result["pairwise_comparison_audit"]["status"] == "not_run"
+    assert result["pairwise_comparison_audit"]["resamples_used"] == 0
 
 
 def test_safe_mlp_evaluation_localizes_architecture_failure() -> None:
@@ -268,7 +299,7 @@ def test_all_failed_mlp_architectures_disable_override_cleanly() -> None:
 def test_mlp_override_requires_clear_minimum_improvement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(mlp_module._MLP_BUDGETS["fast"], "bootstrap_repeats", 5)
+    monkeypatch.setitem(mlp_module._MLP_BUDGETS["fast"], "bootstrap_repeats", 50)
     y = np.asarray([0, 1] * 20)
     perfect = y.tolist()
     inverse = (1 - y).tolist()
@@ -395,9 +426,60 @@ def test_singlelabel_override_compares_against_point_strongest_probe() -> None:
     assert evidence["strongest_simpler_probe_by_metric"] == {
         "balanced_accuracy": "kernel_approx"
     }
+    assert set(evidence["pairwise_comparisons"]) == {"dummy", "kernel_approx"}
     assert evidence["recommendation_override"] is False
     assert evidence["metrics_beating_dummy"] == ["balanced_accuracy"]
     assert evidence["metrics_beating_strongest_simpler"] == []
+    assert evidence["pairwise_comparison_audit"]["comparators_by_metric"] == {
+        "balanced_accuracy": {
+            "dummy": "dummy",
+            "strongest_simpler": "kernel_approx",
+        }
+    }
+
+
+def test_mlp_pairwise_audit_resample_plan_is_deterministic() -> None:
+    y = np.asarray([0, 1] * 30)
+    perfect = y.tolist()
+    inverse = (1 - y).tolist()
+    comparator_results = {
+        "dummy": {"balanced_accuracy": 0.5, "predictions": np.zeros_like(y).tolist()},
+        **{
+            name: {"balanced_accuracy": 0.0, "predictions": inverse}
+            for name in ("linear", "smooth_poly", "knn", "kernel_approx")
+        },
+    }
+    mlp_results = {
+        "mlp_one_layer_compact": {
+            "balanced_accuracy": 1.0,
+            "predictions": perfect,
+        }
+    }
+    config = ProfilerConfig(
+        mlp_probes=True,
+        budget="fast",
+        random_state=7,
+    )
+    first = _singlelabel_override_evidence(
+        mlp_results,
+        comparator_results,
+        y_true=y,
+        config=config,
+        groups=None,
+    )["pairwise_comparison_audit"]
+    second = _singlelabel_override_evidence(
+        mlp_results,
+        comparator_results,
+        y_true=y,
+        config=config,
+        groups=None,
+    )["pairwise_comparison_audit"]
+
+    assert first["status"] == second["status"] == "available"
+    assert first["method"] == "paired_oof_bootstrap"
+    assert first["scope"] == "dummy_and_metric_strongest_simpler"
+    assert first["resample_plan_id"] == second["resample_plan_id"]
+    assert first["resamples_used"] == second["resamples_used"]
 
 
 def test_singlelabel_override_requires_paired_dummy_signal() -> None:
@@ -429,6 +511,243 @@ def test_singlelabel_override_requires_paired_dummy_signal() -> None:
     assert "dummy baseline" in evidence["override_reason"]
 
 
+def _patch_cached_pair_summaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    """Return deterministic cache stubs while recording target-aware inputs."""
+    calls: list[dict[str, object]] = []
+
+    def fake_build(y_true, predictions, **kwargs):
+        calls.append(
+            {
+                "y_true": np.asarray(y_true),
+                "predictions": dict(predictions),
+                **kwargs,
+            }
+        )
+        metric_names = {
+            "singlelabel": ("balanced_accuracy",),
+            "multilabel": ("micro_f1", "macro_f1", "sample_jaccard"),
+            "regression": ("r2_variance_weighted", "r2_uniform_average"),
+        }[kwargs["target_mode"]]
+        return SimpleNamespace(
+            status="available",
+            reason=None,
+            resamples_requested=int(kwargs["requested_resamples"]),
+            resamples_used=12,
+            resample_plan_id="shared-test-plan",
+            metric_names=metric_names,
+        )
+
+    def fake_summary(cache, first_probe, second_probe, *, point_scores):
+        first_points = point_scores[first_probe]
+        second_points = point_scores[second_probe]
+        return {
+            "metrics": {
+                metric: {
+                    "point_delta": float(first_points[metric])
+                    - float(second_points[metric]),
+                    "mean_delta": float(first_points[metric])
+                    - float(second_points[metric]),
+                    "paired_standard_error": 0.0,
+                    "lower_95": max(
+                        0.0,
+                        float(first_points[metric]) - float(second_points[metric]),
+                    ),
+                    "upper_95": float(first_points[metric])
+                    - float(second_points[metric]),
+                    "resamples_requested": cache.resamples_requested,
+                    "resamples_used": cache.resamples_used,
+                }
+                for metric in cache.metric_names
+            }
+        }
+
+    monkeypatch.setattr(mlp_module, "_build_paired_score_cache", fake_build)
+    monkeypatch.setattr(mlp_module, "_summarize_cached_probe_pair", fake_summary)
+    return calls
+
+
+def test_multilabel_override_retains_only_dummy_and_metric_specific_strongest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_cached_pair_summaries(monkeypatch)
+    Y = np.zeros((20, 3), dtype=int)
+    predictions = Y.tolist()
+    mlp_results = {
+        "mlp_one_layer_compact": {
+            "micro_f1": 0.9,
+            "macro_f1": 0.9,
+            "sample_jaccard": 0.9,
+            "predictions": predictions,
+        }
+    }
+    comparator_results = {
+        "dummy": {
+            "micro_f1": 0.0,
+            "macro_f1": 0.0,
+            "sample_jaccard": 0.0,
+            "predictions": predictions,
+        },
+        "linear": {
+            "micro_f1": 0.8,
+            "macro_f1": 0.2,
+            "sample_jaccard": 0.2,
+            "predictions": predictions,
+        },
+        "smooth_poly": {
+            "micro_f1": 0.7,
+            "macro_f1": 0.8,
+            "sample_jaccard": 0.3,
+            "predictions": predictions,
+        },
+        "knn": {
+            "micro_f1": 0.6,
+            "macro_f1": 0.4,
+            "sample_jaccard": 0.85,
+            "predictions": predictions,
+        },
+        "kernel_approx": {
+            "micro_f1": 0.5,
+            "macro_f1": 0.3,
+            "sample_jaccard": 0.5,
+            "predictions": predictions,
+        },
+    }
+    groups = np.repeat(np.arange(10), 2)
+    labels = np.asarray(["a", "b", "c"])
+    evidence = _multilabel_override_evidence(
+        mlp_results,
+        comparator_results,
+        Y_true=Y,
+        label_names=labels,
+        config=ProfilerConfig(mlp_probes=True, budget="fast", random_state=0),
+        groups=groups,
+    )
+
+    assert evidence["strongest_simpler_probe_by_metric"] == {
+        "micro_f1": "linear",
+        "macro_f1": "smooth_poly",
+        "sample_jaccard": "knn",
+    }
+    assert set(evidence["pairwise_comparisons"]) == {
+        "dummy",
+        "linear",
+        "smooth_poly",
+        "knn",
+    }
+    assert "kernel_approx" not in evidence["pairwise_comparisons"]
+    assert evidence["pairwise_comparisons"]["linear"] == {
+        "micro_f1": evidence["pairwise_comparisons"]["linear"]["micro_f1"]
+    }
+    assert evidence["pairwise_comparison_audit"] == {
+        "status": "available",
+        "method": "paired_oof_bootstrap",
+        "scope": "dummy_and_metric_strongest_simpler",
+        "resamples_requested": 200,
+        "resamples_used": 12,
+        "resample_plan_id": "shared-test-plan",
+        "comparators_by_metric": {
+            "micro_f1": {"dummy": "dummy", "strongest_simpler": "linear"},
+            "macro_f1": {"dummy": "dummy", "strongest_simpler": "smooth_poly"},
+            "sample_jaccard": {"dummy": "dummy", "strongest_simpler": "knn"},
+        },
+        "reason": None,
+    }
+    assert len(calls) == 1
+    assert calls[0]["target_mode"] == "multilabel"
+    assert np.array_equal(calls[0]["groups"], groups)
+    assert np.array_equal(calls[0]["names"], labels)
+    assert set(calls[0]["predictions"]) == {
+        "mlp_one_layer_compact",
+        "dummy",
+        "linear",
+        "smooth_poly",
+        "knn",
+    }
+
+
+def test_regression_override_deduplicates_metric_specific_strongest_comparators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_cached_pair_summaries(monkeypatch)
+    Y = np.zeros((20, 2), dtype=float)
+    predictions = Y.tolist()
+    mlp_results = {
+        "mlp_one_layer_compact": {
+            "r2_variance_weighted": 0.9,
+            "r2_uniform_average": 0.9,
+            "predictions": predictions,
+        }
+    }
+    comparator_results = {
+        "dummy": {
+            "r2_variance_weighted": 0.0,
+            "r2_uniform_average": 0.0,
+            "predictions": predictions,
+        },
+        "linear": {
+            "r2_variance_weighted": 0.8,
+            "r2_uniform_average": 0.85,
+            "predictions": predictions,
+        },
+        "smooth_poly": {
+            "r2_variance_weighted": 0.7,
+            "r2_uniform_average": 0.7,
+            "predictions": predictions,
+        },
+        "knn": {
+            "r2_variance_weighted": 0.6,
+            "r2_uniform_average": 0.4,
+            "predictions": predictions,
+        },
+        "kernel_approx": {
+            "r2_variance_weighted": 0.5,
+            "r2_uniform_average": 0.3,
+            "predictions": predictions,
+        },
+    }
+    names = np.asarray(["first", "second"])
+    evidence = _regression_override_evidence(
+        mlp_results,
+        comparator_results,
+        Y_true=Y,
+        target_names=names,
+        config=ProfilerConfig(mlp_probes=True, budget="fast", random_state=0),
+        groups=None,
+    )
+
+    assert evidence["strongest_simpler_probe_by_metric"] == {
+        "r2_variance_weighted": "linear",
+        "r2_uniform_average": "linear",
+    }
+    assert set(evidence["pairwise_comparisons"]) == {"dummy", "linear"}
+    assert set(evidence["pairwise_comparisons"]["linear"]) == {
+        "r2_variance_weighted",
+        "r2_uniform_average",
+    }
+    assert "knn" not in evidence["pairwise_comparisons"]
+    assert "kernel_approx" not in evidence["pairwise_comparisons"]
+    assert evidence["pairwise_comparison_audit"]["comparators_by_metric"] == {
+        "r2_variance_weighted": {
+            "dummy": "dummy",
+            "strongest_simpler": "linear",
+        },
+        "r2_uniform_average": {
+            "dummy": "dummy",
+            "strongest_simpler": "linear",
+        },
+    }
+    assert len(calls) == 1
+    assert calls[0]["target_mode"] == "regression"
+    assert np.array_equal(calls[0]["names"], names)
+    assert set(calls[0]["predictions"]) == {
+        "mlp_one_layer_compact",
+        "dummy",
+        "linear",
+    }
+
+
 @pytest.mark.parametrize("failure", ["missing", "runtime", "misaligned", "metric"])
 def test_singlelabel_override_requires_complete_comparator_evidence(
     failure: str,
@@ -456,18 +775,13 @@ def test_singlelabel_override_requires_complete_comparator_evidence(
     assert evidence["recommendation_override"] is False
 
 
-def _fixed_positive_bootstrap(*args, **kwargs) -> dict[str, float]:
-    """Return a positive interval so point deltas isolate override aggregation."""
-    return {"mean_delta": 0.1, "lower_95": 0.05, "upper_95": 0.15}
-
-
 @pytest.mark.parametrize("qualifying_metrics, expected", [(2, True), (1, False)])
 def test_multilabel_override_requires_two_jointly_qualifying_metrics(
     monkeypatch: pytest.MonkeyPatch,
     qualifying_metrics: int,
     expected: bool,
 ) -> None:
-    monkeypatch.setattr(mlp_module, "_bootstrap_comparison", _fixed_positive_bootstrap)
+    _patch_cached_pair_summaries(monkeypatch)
     metric_names = ("micro_f1", "macro_f1", "sample_jaccard")
     Y = np.zeros((20, 3), dtype=int)
     mlp_scores = {metric: 0.6 for metric in metric_names}
@@ -510,7 +824,7 @@ def test_regression_override_requires_both_jointly_qualifying_metrics(
     qualifying_metrics: int,
     expected: bool,
 ) -> None:
-    monkeypatch.setattr(mlp_module, "_bootstrap_comparison", _fixed_positive_bootstrap)
+    _patch_cached_pair_summaries(monkeypatch)
     metric_names = ("r2_variance_weighted", "r2_uniform_average")
     Y = np.zeros((20, 2), dtype=float)
     mlp_scores = {metric: 0.6 for metric in metric_names}
@@ -665,6 +979,9 @@ def test_singlelabel_mlp_completed_path_disables_override_after_partial_failure(
     assert result["status"] == "completed"
     assert result["recommendation_override"] is False
     assert result["required_comparators_complete"] is True
+    assert set(result["aligned_comparators"]) == set(
+        mlp_module._REQUIRED_MLP_COMPARATORS
+    )
     assert result["architectures_complete"] is False
     assert any(
         item.get("status") == "runtime_failed" for item in result["architectures"]
@@ -710,6 +1027,9 @@ def test_multilabel_mlp_completed_path(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert result["status"] == "completed"
     assert result["best_architecture"] is not None
+    assert set(result["aligned_comparators"]) == set(
+        mlp_module._REQUIRED_MLP_COMPARATORS
+    )
 
 
 def test_regression_mlp_completed_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -749,6 +1069,9 @@ def test_regression_mlp_completed_path(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert result["status"] == "completed"
     assert result["best_architecture"] is not None
+    assert set(result["aligned_comparators"]) == set(
+        mlp_module._REQUIRED_MLP_COMPARATORS
+    )
 
 
 def test_torch_mlp_does_not_mutate_numpy_global_rng() -> None:

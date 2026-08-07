@@ -45,6 +45,22 @@ must show paired signal above dummy and paired improvement over the strongest
 simpler probe on the required primary metrics. Failed or infeasible group splits
 never fall back to in-sample override evidence.
 
+MLP comparisons use one target-aware paired-bootstrap cache for the MLP cohort.
+That cohort is capped, dense, and aligned independently from the ordinary-probe
+cohort, so the ordinary cache cannot be reused literally. The cache includes
+the selected best MLP, dummy, and the union of the metric-specific strongest
+simpler comparators; only those needed pairwise summaries are retained. The
+required comparator fits are still evaluated (subject to the existing
+infeasibility handling) and their complete results remain under
+`report.metrics["mlp_probes"]["aligned_comparators"]`. The cache removes repeated
+resampling/scoring work, while MLP fitting generally remains the dominant
+optional runtime cost.
+
+Inspect `pairwise_comparison_audit` for the cache status, requested and used
+resamples, resample-plan identifier, and metric-to-comparator mapping. Its
+schema and status meanings are documented in
+[the report reference](reports.md#optional-mlp-pairwise-audit).
+
 ## Choosing a budget
 
 - `fast` is useful for iteration and skips persistent topology in auto mode.
