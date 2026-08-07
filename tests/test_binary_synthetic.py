@@ -3,7 +3,7 @@ from sklearn.datasets import make_blobs, make_circles, make_classification, make
 
 from separatix import diagnose
 from separatix.constants import (
-    FEATURE_OR_LABEL_BOTTLENECK_LIKELY,
+    FEATURE_OR_TARGET_BOTTLENECK_LIKELY,
     KERNEL_OR_LOCAL_RECOMMENDED,
     LINEAR_LIKELY_SUFFICIENT,
     SMOOTH_NONLINEAR_RECOMMENDED,
@@ -73,6 +73,6 @@ def test_random_labels_are_bottleneck_or_inconclusive() -> None:
     y = np.random.default_rng(0).permutation(y)
     report = diagnose(X, y, return_report=True, random_state=0)
     assert report.recommendation in {
-        FEATURE_OR_LABEL_BOTTLENECK_LIKELY,
+        FEATURE_OR_TARGET_BOTTLENECK_LIKELY,
         "inconclusive",
     }

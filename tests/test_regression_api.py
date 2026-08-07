@@ -5,8 +5,24 @@ import pytest
 from scipy import sparse
 
 from separatix import DiagnosticReport, diagnose
-from separatix.constants import INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY
+from separatix.constants import (
+    INCONCLUSIVE,
+    INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY,
+    LINEAR_LIKELY_SUFFICIENT,
+    RECOMMENDATION_LABELS,
+)
 from separatix.metrics.neighborhood import _regression_summary
+
+_RETIRED_RECOMMENDATION_LABELS = (
+    "linear_response_likely_sufficient",
+    "smooth_nonlinear_response_recommended",
+    "kernel_or_local_regression_recommended",
+    "higher_capacity_or_partitioning_regression_recommended",
+    "feedforward_mlp_regression_recommended",
+    "feature_or_label_bottleneck_likely",
+    "insufficient_data_or_unreliable_regression_geometry",
+    "inconclusive_regression_diagnostic",
+)
 
 
 def _linear_regression_data() -> tuple[np.ndarray, np.ndarray]:
@@ -40,9 +56,8 @@ def test_one_group_regression_never_uses_resubstitution_for_guidance() -> None:
     assert report.grouping["effective_supervised_evaluation_mode"] == (
         "group_split_unavailable"
     )
-    assert report.recommendation == (
-        INSUFFICIENT_DATA_OR_UNRELIABLE_REGRESSION_GEOMETRY
-    )
+    assert report.recommendation == INSUFFICIENT_DATA_OR_UNRELIABLE_GEOMETRY
+    assert report.confidence == "low"
 
 
 def test_multitarget_neighborhood_is_invariant_to_target_units() -> None:
@@ -75,9 +90,15 @@ def test_single_target_regression_returns_report_and_json() -> None:
     assert report.class_summary["target_type"] == "regression"
     assert "regression_recommendation_evidence" in report.metrics
     assert "explicit regression diagnostic" in report.recommendation_text
+    assert "This is an explicit regression diagnostic." in report.recommendation_text
+    assert "ridge or elastic-net regression" in report.recommendation_text
     assert "paired bootstrap intervals" not in report.decision_path[0]
     assert any("paired bootstrap intervals" in step for step in report.decision_path)
-    assert json.loads(report.to_json())["class_summary"]["target_type"] == "regression"
+    serialized = report.to_json()
+    payload = json.loads(serialized)
+    assert payload["class_summary"]["target_type"] == "regression"
+    assert payload["recommendation"] in RECOMMENDATION_LABELS
+    assert all(retired not in serialized for retired in _RETIRED_RECOMMENDATION_LABELS)
 
 
 def test_multitarget_regression_reports_per_target_summary() -> None:
@@ -148,6 +169,6 @@ def test_linear_regression_data_recommends_linear_or_inconclusive() -> None:
         random_state=0,
     )
     assert report.recommendation in {
-        "linear_response_likely_sufficient",
-        "inconclusive_regression_diagnostic",
+        LINEAR_LIKELY_SUFFICIENT,
+        INCONCLUSIVE,
     }

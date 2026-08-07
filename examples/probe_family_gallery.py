@@ -67,7 +67,7 @@ SHORT_RECOMMENDATIONS = {
     "kernel_or_local_recommended": "kernel or local",
     "high_capacity_or_partitioning_recommended": "higher capacity",
     "feedforward_mlp_recommended": "feed-forward MLP",
-    "feature_or_label_bottleneck_likely": "feature / label bottleneck",
+    "feature_or_target_bottleneck_likely": "feature / target bottleneck",
     "insufficient_data_or_unreliable_geometry": "unreliable geometry",
     "inconclusive": "inconclusive",
 }
