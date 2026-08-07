@@ -128,9 +128,28 @@ deployment_report = diagnose(
 Use the same Separatix configuration in both stages when you want the reports to
 be directly comparable. The first report describes the evidence available when
 candidate families are selected. The second describes the enlarged cohort on
-which the final model will train. A changed recommendation is useful evidence
-of training-size sensitivity; it is not, by itself, proof that either family
-will perform best.
+which the final model will train. Compare the evaluation support explicitly:
+
+```python
+def evaluation_support(report):
+    evaluation = report.metrics["probe_evaluation"]
+    return {
+        "cohort_n_samples": evaluation["n_samples"],
+        "effective_train_size_summary": evaluation[
+            "effective_train_size_summary"
+        ],
+    }
+
+print(evaluation_support(selection_report))
+print(evaluation_support(deployment_report))
+```
+
+Check `status` and `basis` before comparing `min`, `median`, `mean`, `max`, or
+`mean_fraction_of_evaluation_cohort`. The fraction uses each report's own
+post-sampling evaluation cohort (`probe_evaluation["n_samples"]`) as its
+denominator, so a change in sampling or densification must be read alongside
+the cohort count. This summary covers ordinary probes only; it does not include
+optional MLP probes and does not estimate performance at other training sizes.
 
 The held-out folds used internally by Separatix compare diagnostic probes. They
 are not an independent estimate of the performance of the final tuned model and

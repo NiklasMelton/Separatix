@@ -59,12 +59,16 @@ matter:
    training and validation cohorts, rerun Separatix on that enlarged development
    cohort, and record the second report before fitting the final model.
 
-The first report supports selection-time reasoning. The second is a
-final-fit-size diagnostic and may inform the final model specification when the
-apparent geometry changes with more training data. Neither run should receive
-test rows or test labels. Make every remaining decision before evaluating the
-final fitted model once on the untouched test set; that test is the independent
-assessment of the complete procedure.
+The first report supports selection-time reasoning. The second records the
+evidence on the enlarged final development cohort and may inform the final model
+specification. Compare each report's `probe_evaluation.n_samples` and
+`effective_train_size_summary` (checking `status` and `basis` before comparing
+numeric fields) to explain what rows and fold-fit sizes supported the two runs;
+these fields are descriptive metadata, not a claim about performance at other
+training sizes. Neither run should receive test rows or test labels. Make every
+remaining decision before evaluating the final fitted model once on the
+untouched test set; that test is the independent assessment of the complete
+procedure.
 
 See the [two-stage experimental protocol](docs/quickstart.md#two-stage-experimental-protocol)
 for an example and interpretation guidance.
@@ -152,6 +156,20 @@ and dummy comparisons use paired bootstrap intervals; affected comparisons fall
 back to marginal uncertainty when paired evidence is unavailable. The paired
 intervals capture covariance between probe errors, but remain diagnostic
 resampling evidence rather than independent-test confidence intervals.
+
+Reports also expose effective fit-size metadata for these ordinary probes at
+`report.metrics["probe_evaluation"]["effective_train_size_summary"]`. Its
+`status` is `"available"` or `"unavailable"`; when available, `basis` is
+`"held_out_folds"` or `"resubstitution"`. The `min`, `median`, `mean`, and
+`max` fields summarize the rows used to fit the ordinary probe instances, and
+`mean_fraction_of_evaluation_cohort` is the mean divided by
+`report.metrics["probe_evaluation"]["n_samples"]`. That denominator is the
+shared evaluation cohort *after* any memory-aware sampling or densification, not
+necessarily the number of rows originally passed to `diagnose`. An unavailable
+summary has `basis=None` in Python (JSON `null`) and `None` for every numeric
+field (JSON `null`). This metadata covers ordinary probes only; optional MLP
+probes are not included. It describes one evaluation run and is not a
+learning-curve or training-size-sensitivity diagnostic.
 
 Optional feed-forward MLP probes can be installed and enabled explicitly:
 

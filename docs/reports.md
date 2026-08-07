@@ -63,6 +63,40 @@ paired comparisons are conditional on the best probe selected to represent each
 family; they do not adjust for selecting that representative from the same OOF
 evidence.
 
+The same `probe_evaluation` object contains
+`effective_train_size_summary`, a per-run summary of rows used to fit the shared
+ordinary probes:
+
+```python
+evaluation = report.metrics["probe_evaluation"]
+summary = evaluation["effective_train_size_summary"]
+```
+
+Its schema is fixed:
+
+- `status`: `"available"` when the fit row counts are known, otherwise
+  `"unavailable"`.
+- `basis`: `"held_out_folds"` for cross-validation fold fits,
+  `"resubstitution"` for an ungrouped no-split fallback, or `None` when the
+  summary is unavailable.
+- `min`, `median`, `mean`, and `max`: the smallest, median, arithmetic mean,
+  and largest fit-row counts. The first and last are integers; the median and
+  mean are floats. They are `None` (JSON `null`) when `status` is
+  `"unavailable"`.
+- `mean_fraction_of_evaluation_cohort`: `mean` divided by
+  `evaluation["n_samples"]`, or `None` (JSON `null`) when unavailable.
+
+`evaluation["n_samples"]` is the denominator for this fraction and is the
+number of rows in the shared evaluation cohort after any memory-aware sampling
+or densification. It is therefore the post-sampling evaluation denominator,
+not necessarily the original input row count. For `"held_out_folds"`, the
+summary is derived from the existing `train_sizes`; for `"resubstitution"`,
+the full post-sampling cohort is the fit size. If no ordinary probe fit or
+usable evaluation basis can provide counts, all numeric fields are `None`.
+Optional MLP probes are outside this summary. The summary is descriptive
+metadata for one run, not an implemented learning curve or size-sensitivity
+analysis.
+
 The package compares simple families first and requires clear evidence before
 escalating. Geometry and topology support the explanation; they do not bypass a
 weak predictive-signal gate.

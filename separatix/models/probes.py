@@ -35,6 +35,7 @@ from separatix.models.scoring import (
     evaluate_multilabel_estimator,
     evaluate_regression_estimator,
     materialize_evaluation_plan,
+    summarize_effective_train_size,
     summarize_multilabel_predictions,
     summarize_multilabel_stability,
     summarize_predictions,
@@ -264,6 +265,11 @@ def _unavailable_run(
         "train_sizes": [],
         "test_sizes": [],
         "fold_assignments": None,
+        "effective_train_size_summary": summarize_effective_train_size(
+            int(sample_info.get("n_used", 0)),
+            [],
+            basis=None,
+        ),
         "row_indices": sample_info.get("indices", []),
     }
     return ProbeRunResult(
@@ -1178,6 +1184,9 @@ def run_regression_model_probes(
         method=cv_method,
         row_indices=np.asarray(sample_info["indices"], dtype=int),
         groups=groups_used,
+        no_split_basis=(
+            "resubstitution" if cv is None and groups_used is None else None
+        ),
     )
     evaluation["row_indices"] = sample_info["indices"]
     evaluation_plan_id = str(evaluation["evaluation_plan_id"])
