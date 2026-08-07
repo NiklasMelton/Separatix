@@ -36,6 +36,42 @@ from separatix.sampling import (
 )
 
 
+def summarize_effective_train_size(
+    n_samples: int,
+    train_sizes: list[int],
+    *,
+    basis: str | None,
+) -> dict[str, Any]:
+    """Summarize the row counts used to fit each ordinary probe instance."""
+    if basis is None:
+        return {
+            "status": "unavailable",
+            "basis": None,
+            "min": None,
+            "median": None,
+            "mean": None,
+            "max": None,
+            "mean_fraction_of_evaluation_cohort": None,
+        }
+    if basis not in {"held_out_folds", "resubstitution"}:
+        raise ValueError(f"Unsupported effective train-size basis: {basis!r}.")
+    sizes = np.asarray(train_sizes, dtype=int)
+    if sizes.size == 0:
+        raise ValueError("Available effective train-size metadata requires row counts.")
+    mean_size = float(np.mean(sizes))
+    return {
+        "status": "available",
+        "basis": basis,
+        "min": int(np.min(sizes)),
+        "median": float(np.median(sizes)),
+        "mean": mean_size,
+        "max": int(np.max(sizes)),
+        "mean_fraction_of_evaluation_cohort": (
+            float(mean_size / n_samples) if n_samples > 0 else None
+        ),
+    }
+
+
 def materialize_evaluation_plan(
     cv: Any | None,
     X: Any,
@@ -44,9 +80,11 @@ def materialize_evaluation_plan(
     method: str,
     row_indices: np.ndarray,
     groups: np.ndarray | None = None,
+    no_split_basis: str | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """Materialize one reusable split plan and return transparent metadata."""
     row_indices = np.asarray(row_indices, dtype=int)
+    n_samples = int(row_indices.size)
     digest = hashlib.sha256()
     digest.update(row_indices.tobytes())
     digest.update(method.encode("utf-8"))
@@ -55,12 +93,17 @@ def materialize_evaluation_plan(
             "alignment_status": "unavailable",
             "evaluation_plan_id": digest.hexdigest()[:16],
             "cv_method": method,
-            "n_samples": int(row_indices.size),
+            "n_samples": n_samples,
             "n_splits": 0,
             "group_aware": bool(groups is not None),
             "train_sizes": [],
             "test_sizes": [],
             "fold_assignments": None,
+            "effective_train_size_summary": summarize_effective_train_size(
+                n_samples,
+                [n_samples] if no_split_basis == "resubstitution" else [],
+                basis=no_split_basis,
+            ),
         }
 
     split_iter = cv.split(X, y, groups) if groups is not None else cv.split(X, y)
@@ -79,16 +122,22 @@ def materialize_evaluation_plan(
         assignments[test_idx] = fold
     if np.any(assignments < 0):
         raise ValueError("Evaluation split plan does not cover every evaluation row.")
+    train_sizes = [int(train_idx.size) for train_idx, _ in splits]
     return PrecomputedSplitter(splits), {
         "alignment_status": "aligned",
         "evaluation_plan_id": digest.hexdigest()[:16],
         "cv_method": method,
-        "n_samples": int(row_indices.size),
+        "n_samples": n_samples,
         "n_splits": len(splits),
         "group_aware": bool(groups is not None),
-        "train_sizes": [int(train_idx.size) for train_idx, _ in splits],
+        "train_sizes": train_sizes,
         "test_sizes": [int(test_idx.size) for _, test_idx in splits],
         "fold_assignments": assignments.tolist(),
+        "effective_train_size_summary": summarize_effective_train_size(
+            n_samples,
+            train_sizes,
+            basis="held_out_folds",
+        ),
     }
 
 
