@@ -180,12 +180,10 @@ def test_effective_train_size_summary_survives_terse_and_full_serialization() ->
     terse = report.to_dict()
     full = report.to_dict(terse=False)
     assert (
-        terse["metrics"]["probe_evaluation"]["effective_train_size_summary"]
-        == expected
+        terse["metrics"]["probe_evaluation"]["effective_train_size_summary"] == expected
     )
     assert (
-        full["metrics"]["probe_evaluation"]["effective_train_size_summary"]
-        == expected
+        full["metrics"]["probe_evaluation"]["effective_train_size_summary"] == expected
     )
 
     terse_json = json.loads(report.to_json())
