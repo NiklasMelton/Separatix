@@ -13,6 +13,7 @@ _TERSE_PRUNED_KEYS = frozenset(
     {
         "candidate_indices",
         "candidate_trigger_counts",
+        "fold_assignments",
         "local_ambiguity",
         "local_entropy",
         "local_cardinality_std",

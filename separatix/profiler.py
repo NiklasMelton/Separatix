@@ -97,9 +97,10 @@ class ComplexityProfiler:
         n_jobs: Optional parallel job count forwarded to supported estimators.
         mlp_probes: Enable conditional feed-forward MLP probes.
         mlp_device: Device policy for optional MLP probes.
-        mlp_trigger_skill_threshold: Minimum simpler-probe skill for the MLP
-            trigger policy.
-        mlp_min_improvement: Minimum held-out MLP gain required for an override.
+        mlp_trigger_skill_threshold: Minimum simpler-probe skill used only by the
+            MLP compute-trigger policy.
+        mlp_min_improvement: Minimum paired held-out MLP gain over dummy and the
+            strongest simpler probe required for an override.
         mlp_max_parameters: Optional hard MLP parameter cap.
 
     Attributes:
@@ -223,7 +224,7 @@ class ComplexityProfiler:
             report_context=report_context,
             groups=validated.evaluable_groups,
         )
-        probes = run_model_probes(
+        probe_run = run_model_probes(
             X_evaluable,
             validated.evaluable_y_encoded,
             config=self.config,
@@ -231,6 +232,7 @@ class ComplexityProfiler:
             class_labels=validated.evaluable_classes_,
             groups=validated.evaluable_groups,
         )
+        probes = probe_run.probes
         baseline = summarize_probe_family(probes)
         neighborhood = compute_neighborhood_diagnostics(
             X_evaluable,
@@ -261,6 +263,8 @@ class ComplexityProfiler:
             "audit": audit,
             "geometry": geometry,
             "probes": probes,
+            "probe_evaluation": probe_run.evaluation,
+            "paired_probe_comparisons": probe_run.paired_comparisons,
             "baseline": baseline,
             "neighborhood": neighborhood,
             "boundary": boundary,
@@ -377,7 +381,7 @@ class ComplexityProfiler:
             report_context=report_context,
             groups=validated.groups,
         )
-        probes = run_regression_model_probes(
+        probe_run = run_regression_model_probes(
             validated.X,
             Y_usable,
             config=self.config,
@@ -385,6 +389,7 @@ class ComplexityProfiler:
             target_names=target_names,
             groups=validated.groups,
         )
+        probes = probe_run.probes
         neighborhood = compute_regression_neighborhood_diagnostics(
             validated.X,
             Y_usable,
@@ -417,6 +422,8 @@ class ComplexityProfiler:
             "audit": audit,
             "geometry": geometry,
             "probes": probes,
+            "probe_evaluation": probe_run.evaluation,
+            "paired_probe_comparisons": probe_run.paired_comparisons,
             "baseline": self._regression_baseline_summary(probes),
             "neighborhood": neighborhood,
             "boundary": skipped_common,
@@ -543,7 +550,7 @@ class ComplexityProfiler:
         )
         label_names = validated.label_names[validated.usable_label_mask]
         audit = compute_multilabel_audit(validated)
-        probes = run_multilabel_model_probes(
+        probe_run = run_multilabel_model_probes(
             validated.X,
             Y_usable,
             config=self.config,
@@ -551,6 +558,7 @@ class ComplexityProfiler:
             label_names=label_names,
             groups=validated.groups,
         )
+        probes = probe_run.probes
         neighborhood = compute_multilabel_neighborhood_diagnostics(
             validated.X,
             Y_usable,
@@ -583,6 +591,8 @@ class ComplexityProfiler:
         metrics = {
             "audit": audit,
             "probes": probes,
+            "probe_evaluation": probe_run.evaluation,
+            "paired_probe_comparisons": probe_run.paired_comparisons,
             "baseline": self._multilabel_baseline_summary(probes),
             "neighborhood": neighborhood,
             "boundary": boundary,

@@ -59,10 +59,10 @@ def diagnose(
         mlp_probes: Enable conditional feed-forward MLP probes. PyTorch must be
             installed through the ``mlp`` extra.
         mlp_device: Device policy for optional MLP probes.
-        mlp_trigger_skill_threshold: Minimum simpler-probe skill used by the MLP
-            trigger policy.
+        mlp_trigger_skill_threshold: Minimum simpler-probe skill used only by the
+            MLP compute-trigger policy. It does not gate a completed MLP override.
         mlp_min_improvement: Minimum held-out MLP improvement required for an
-            override.
+            override against both dummy and the strongest simpler probe.
         mlp_max_parameters: Optional hard cap on the MLP parameter count.
 
     Returns:

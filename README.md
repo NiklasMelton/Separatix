@@ -48,6 +48,31 @@ print(report.scores)
 print(report.to_json())
 ```
 
+### Experimental protocol: diagnose twice
+
+When a final test set is reserved, run Separatix at the two training sizes that
+matter:
+
+1. Run it on the selection cohort before choosing and tuning candidate model
+   families against validation data.
+2. After validation-based comparison and tuning are complete, combine the
+   training and validation cohorts, rerun Separatix on that enlarged development
+   cohort, and record the second report before fitting the final model.
+
+The first report supports selection-time reasoning. The second records the
+evidence on the enlarged final development cohort and may inform the final model
+specification. Compare each report's `probe_evaluation.n_samples` and
+`effective_train_size_summary` (checking `status` and `basis` before comparing
+numeric fields) to explain what rows and fold-fit sizes supported the two runs;
+these fields are descriptive metadata, not a claim about performance at other
+training sizes. Neither run should receive test rows or test labels. Make every
+remaining decision before evaluating the final fitted model once on the
+untouched test set; that test is the independent assessment of the complete
+procedure.
+
+See the [two-stage experimental protocol](docs/quickstart.md#two-stage-experimental-protocol)
+for an example and interpretation guidance.
+
 ## What It Accepts
 
 - Dense NumPy arrays
@@ -84,6 +109,27 @@ Non-finite diagnostic values are represented as JSON `null`; `to_json()` never
 emits non-standard `NaN` or infinity literals. The default terse form removes
 large row-level arrays before copying them.
 
+Constructed probe entries also include a compact, versioned `probe_recipe` for
+auditing. It records the resolved estimator graph, preprocessing,
+hyperparameters, training policy, and dynamically detected Python and library
+versions. Reconstruct the corresponding unfitted estimator through the safe
+public factory:
+
+```python
+from separatix import make_probe_estimator
+
+recipe = report.metrics["probes"]["linear"]["probe_recipe"]
+estimator = make_probe_estimator(recipe)
+```
+
+The factory only accepts a fixed allowlist of supported scikit-learn and
+Separatix probe components; serialized recipes cannot request arbitrary imports.
+Skipped probes report why a recipe is unavailable instead of implying that an
+unconstructed estimator can be reproduced. The factory reconstructs the
+unfitted estimator configuration; it does not replay the diagnostic's row
+cohort, validation folds, or scoring orchestration. Those details remain
+separate report evidence.
+
 For multilabel targets, `separatix` compares probe families across micro F1,
 macro F1, and sample Jaccard rather than collapsing the evidence into a single
 weighted score. Optional iterative multilabel stratification can be installed
@@ -104,6 +150,27 @@ training fold. Sparse probes use non-centering scaling. Geometry and topology
 continue to describe the supplied, unscaled coordinate space, and the report
 records both choices under `preprocessing`.
 
+Ordinary probe families are evaluated on one shared row cohort and one shared
+held-out split plan. When aligned out-of-fold predictions are available, family
+and dummy comparisons use paired bootstrap intervals; affected comparisons fall
+back to marginal uncertainty when paired evidence is unavailable. The paired
+intervals capture covariance between probe errors, but remain diagnostic
+resampling evidence rather than independent-test confidence intervals.
+
+Reports also expose effective fit-size metadata for these ordinary probes at
+`report.metrics["probe_evaluation"]["effective_train_size_summary"]`. Its
+`status` is `"available"` or `"unavailable"`; when available, `basis` is
+`"held_out_folds"` or `"resubstitution"`. The `min`, `median`, `mean`, and
+`max` fields summarize the rows used to fit the ordinary probe instances, and
+`mean_fraction_of_evaluation_cohort` is the mean divided by
+`report.metrics["probe_evaluation"]["n_samples"]`. That denominator is the
+shared evaluation cohort *after* any memory-aware sampling or densification, not
+necessarily the number of rows originally passed to `diagnose`. An unavailable
+summary has `basis=None` in Python (JSON `null`) and `None` for every numeric
+field (JSON `null`). This metadata covers ordinary probes only; optional MLP
+probes are not included. It describes one evaluation run and is not a
+learning-curve or training-size-sensitivity diagnostic.
+
 Optional feed-forward MLP probes can be installed and enabled explicitly:
 
 ```bash
@@ -111,9 +178,29 @@ pip install "separatix[mlp]"
 ```
 
 Set `mlp_probes=True` and use `mlp_device`, `mlp_trigger_skill_threshold`,
-`mlp_min_improvement`, and `mlp_max_parameters` to control them. An MLP can
-override simpler-family guidance only with complete held-out evidence; failed
-or infeasible group splits never fall back to in-sample override evidence.
+`mlp_min_improvement`, and `mlp_max_parameters` to control them. The skill
+threshold is only a compute gate: it determines whether MLP probes run and does
+not participate in a completed override decision. An MLP can override
+simpler-family guidance only with complete held-out evidence, paired signal
+above dummy, and a practical paired gain over the strongest simpler probe for
+the required primary metrics. Failed or infeasible group splits never fall back
+to in-sample override evidence.
+
+MLP pairwise evidence uses one target-aware paired-bootstrap cache local to the
+MLP cohort. The ordinary-probe cache cannot be reused literally because MLP
+probes use their own capped, dense, aligned cohort. The local cache scores the
+selected best MLP, the dummy baseline, and the metric-specific strongest
+simpler comparator once, then retains only the comparisons needed for the
+override. All required simpler comparators are still evaluated and remain
+available under `report.metrics["mlp_probes"]["aligned_comparators"]`; pruning
+the retained pairwise summaries does not weaken the completeness gate. This
+optimization avoids repeated resampling and scoring, but MLP fitting remains
+the dominant optional cost and the optimization should not be read as a
+whole-diagnosis speed guarantee.
+
+The MLP payload's `pairwise_comparison_audit` records the cache status and
+resample plan. See [the report reference](docs/reports.md#optional-mlp-pairwise-audit)
+for its exact fields and grouped/class-support behavior.
 
 Optional persistent-topology diagnostics can be installed with:
 
@@ -172,25 +259,24 @@ next-best eligible MLP by at least 0.01 held-out balanced accuracy.
 
 ## Recommendation Categories
 
+The same eight machine-readable labels are used for single-label classification,
+multilabel classification, and explicit regression. Target mode still controls
+the evidence, confidence rules, and plain-text wording (for example, a shared
+`linear_likely_sufficient` label is rendered with regression-specific model
+suggestions when `target_type` is `regression`).
+
 - `linear_likely_sufficient`
 - `smooth_nonlinear_recommended`
 - `kernel_or_local_recommended`
 - `high_capacity_or_partitioning_recommended`
 - `feedforward_mlp_recommended`
-- `feature_or_label_bottleneck_likely`
+- `feature_or_target_bottleneck_likely`
 - `insufficient_data_or_unreliable_geometry`
 - `inconclusive`
-- `linear_response_likely_sufficient`
-- `smooth_nonlinear_response_recommended`
-- `kernel_or_local_regression_recommended`
-- `higher_capacity_or_partitioning_regression_recommended`
-- `feedforward_mlp_regression_recommended`
-- `feature_or_target_bottleneck_likely`
-- `insufficient_data_or_unreliable_regression_geometry`
-- `inconclusive_regression_diagnostic`
 
 These categories are intentionally coarse. They describe the apparent geometry
-and difficulty of the labeled feature space, not a guaranteed best model choice.
+and difficulty of the labeled feature space or response surface, not a
+guaranteed best model choice.
 
 The synthetic recommendation ladder below shows how `separatix` responds as the
 designed dataset geometry moves from simple linear structure toward smoother
@@ -213,15 +299,24 @@ The recommendation is produced by a fixed, inspectable pipeline:
 4. Run simple probe models and compare them to a dummy baseline.
 5. Build probe-family evidence with uncertainty estimates for `linear`,
    `smooth_nonlinear`, and `local_kernel`.
-6. Apply a 95% signal-vs-dummy gate before making any model-family
-   recommendation for single-label targets, or a two-of-three primary-metric
-   signal gate for multilabel targets.
+6. Apply an uncertainty-aware signal-vs-dummy gate before making any
+   model-family recommendation: balanced accuracy for single-label targets, two
+   of three primary metrics for multilabel targets, or at least one of the two
+   primary R2 summaries for regression. Use paired OOF evidence when available
+   and the documented marginal-uncertainty fallback otherwise.
 7. Use conservative escalation: keep the simpler family unless a more complex
    family has a clear uncertainty-adjusted advantage.
 8. Treat fragmentation and optional topology as supporting structural evidence,
    not as shortcuts around weak probe evidence.
 9. Render both a plain-language summary and a structured report, including
-   `raw_best_family` and `recommended_family` when a report is requested.
+   `raw_best_family`, `recommended_family`, and an uncertainty-aware plausible
+   core-family set when a report is requested.
+
+The plausible set is a heuristic competitive frontier over the tested
+`linear`, `smooth_nonlinear`, and `local_kernel` probes. It is not a formal
+confidence set and does not claim that retained families perform equally well.
+Optional MLP and high-capacity structural upgrades remain separate from this
+core-family comparison.
 
 The full rationale and decision rules are documented in
 [the decision pipeline reference](docs/decision_pipeline.md).

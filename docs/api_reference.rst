@@ -27,3 +27,22 @@ Report object
 
 .. autoclass:: separatix.DiagnosticReport
    :members: to_dict, to_json
+
+Probe recipes and audit factory
+-------------------------------
+
+.. autoclass:: separatix.ProbeRecipe
+   :members: from_dict, from_json, from_estimator, recipe_id, schema, schema_version, probe, implementation, estimator_spec, to_dict, as_dict, to_json
+
+.. autofunction:: separatix.build_probe_recipe
+
+.. autofunction:: separatix.make_probe_estimator
+
+Recipe exceptions
+-----------------
+
+.. autoexception:: separatix.ProbeRecipeError
+
+.. autoexception:: separatix.UnsupportedProbeRecipeVersion
+
+.. autoexception:: separatix.ProbeRecipeCompatibilityError

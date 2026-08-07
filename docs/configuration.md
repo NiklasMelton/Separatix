@@ -35,12 +35,31 @@ MLP probes are disabled unless `mlp_probes=True` and PyTorch is installed.
 | --- | --- | --- |
 | `mlp_probes` | `False` | Enable conditional feed-forward probe evaluation. |
 | `mlp_device` | `"cpu"` | Select `"cpu"`, `"auto"`, `"cuda"`, or `"mps"`. |
-| `mlp_trigger_skill_threshold` | `0.75` | Run the optional probe only when simpler-family evidence meets the configured trigger. |
-| `mlp_min_improvement` | `0.02` | Require a minimum held-out gain before an MLP override. |
+| `mlp_trigger_skill_threshold` | `0.75` | Skip MLP computation when simpler-family skill already reaches this threshold; this value never gates an override. |
+| `mlp_min_improvement` | `0.02` | Require this paired held-out gain over both dummy and the strongest simpler probe before an override. |
 | `mlp_max_parameters` | `None` | Cap the MLP parameter count. |
 
-An MLP recommendation requires complete held-out evidence. Failed or infeasible
-group splits never fall back to in-sample override evidence.
+An MLP recommendation requires complete held-out evidence for dummy, linear,
+smooth nonlinear, kNN, and kernel-approximation comparators. The completed MLP
+must show paired signal above dummy and paired improvement over the strongest
+simpler probe on the required primary metrics. Failed or infeasible group splits
+never fall back to in-sample override evidence.
+
+MLP comparisons use one target-aware paired-bootstrap cache for the MLP cohort.
+That cohort is capped, dense, and aligned independently from the ordinary-probe
+cohort, so the ordinary cache cannot be reused literally. The cache includes
+the selected best MLP, dummy, and the union of the metric-specific strongest
+simpler comparators; only those needed pairwise summaries are retained. The
+required comparator fits are still evaluated (subject to the existing
+infeasibility handling) and their complete results remain under
+`report.metrics["mlp_probes"]["aligned_comparators"]`. The cache removes repeated
+resampling/scoring work, while MLP fitting generally remains the dominant
+optional runtime cost.
+
+Inspect `pairwise_comparison_audit` for the cache status, requested and used
+resamples, resample-plan identifier, and metric-to-comparator mapping. Its
+schema and status meanings are documented in
+[the report reference](reports.md#optional-mlp-pairwise-audit).
 
 ## Choosing a budget
 

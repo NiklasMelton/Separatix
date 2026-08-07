@@ -31,3 +31,6 @@ pip-wheel-metadata/
 
 # Jupyter
 .ipynb_checkpoints/
+
+#Agents
+AGENTS.md

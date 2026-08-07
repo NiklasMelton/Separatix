@@ -58,6 +58,24 @@ The profiler implementation that wires these stages together lives in
 and the final score aggregation and recommendation logic lives in
 [separatix/recommendation/engine.py](../separatix/recommendation/engine.py).
 
+## Shared Recommendation Labels
+
+All target modes emit the same eight machine-readable labels. Target type still
+selects the evidence and confidence rules, and the plain-text renderer uses it
+to keep model suggestions and headlines appropriate for classification,
+multilabel classification, or regression.
+
+| Label | Interpretation |
+| --- | --- |
+| `linear_likely_sufficient` | A linear probe is competitive with the strongest observed family. |
+| `smooth_nonlinear_recommended` | Smooth global nonlinear structure appears useful beyond linear models. |
+| `kernel_or_local_recommended` | A local or kernel-style family clearly improves on smoother families. |
+| `high_capacity_or_partitioning_recommended` | Local structure and fragmentation support a more partitioned, higher-capacity family. |
+| `feedforward_mlp_recommended` | An enabled MLP probe clears its configured override gates. |
+| `feature_or_target_bottleneck_likely` | Weak predictive signal is consistent with feature or target/label limitations. |
+| `insufficient_data_or_unreliable_geometry` | Evidence is too incomplete or unstable for a trustworthy family recommendation. |
+| `inconclusive` | The available evidence does not resolve a recommendation category. |
+
 ## Diagnostic Families
 
 The recommendation engine does not act on raw coordinates alone. It combines
@@ -69,8 +87,10 @@ several different views of the labeled feature space.
 - a multilabel path for binary indicator targets
 - an explicit regression path for continuous single- or multi-target problems
 
-The evidence objects and recommendation labels are tailored to the target
-structure.
+The evidence objects and confidence rules are tailored to the target structure,
+while the machine-readable recommendation vocabulary is shared across target
+modes. Plain-text rendering uses the target type to retain task-appropriate
+headlines and next-model suggestions.
 
 ### Dataset Audit
 
@@ -103,12 +123,27 @@ Dense inputs are centered and scaled, sparse inputs are scaled without
 centering, and random-feature maps run after scaling. Geometry and topology
 remain descriptions of the original input coordinates.
 
+All active ordinary probes use the same evaluation rows and a single
+materialized validation split plan. When dense-only probes require memory-aware
+subsampling, that support-preserving cohort becomes the shared cohort for the
+other ordinary probes as well. Each probe records the same
+`evaluation_plan_id`.
+
 - If the linear probe is close to the strongest observed family, that supports
   a linear recommendation.
 - If nonlinear probes clearly improve over linear, that supports a nonlinear
   recommendation.
 - If all probes are only slightly better than the dummy or prevalence
   baseline, that suggests weak usable signal or a feature/label bottleneck.
+
+Optional MLP probes use two separate gates. The configured absolute-skill
+threshold is only a compute gate: an MLP is evaluated when the simpler probes
+do not already reach it. After evaluation, that threshold is ignored. An MLP
+override instead requires complete aligned held-out comparator evidence, a
+paired practical gain over the strongest simpler probe for each qualifying
+metric, and paired signal above dummy on the same metrics. Single-label needs
+balanced accuracy to qualify, multilabel needs at least two of its three primary
+metrics, and regression needs both primary R2 summaries.
 
 ### Neighborhood Diagnostics
 
@@ -188,6 +223,18 @@ Probe uncertainty combines:
 
 - a class-aware balanced-accuracy variance estimate
 - repeated holdout stability when the budget includes repeated fits
+
+Recommendation comparisons primarily use paired bootstrap deltas computed from
+the shared out-of-fold predictions. The report records point deltas, paired
+standard errors, 95% percentile bounds, resample counts, and the decision
+method. Marginal uncertainty remains visible and is used as a per-comparison
+fallback when aligned prediction evidence is unavailable. Paired OOF bootstrap
+intervals account for correlated probe errors, but they are not confidence
+intervals from an independent test set. With `groups`, the bootstrap resamples
+whole groups and rejects single-label resamples that lose required class
+support. Family comparisons are conditional on the probe selected to represent
+each family and do not adjust for selecting that representative from the same
+OOF evidence.
 
 For multilabel probes, `separatix` records the corresponding evidence across
 three primary metrics:
@@ -344,7 +391,7 @@ reliable enough to trust" rather than overstate a model recommendation.
 The final recommendation is not a simple threshold cascade over the summary
 scores. Instead, it follows a conservative escalation policy:
 
-1. Decide whether there is usable label signal at all.
+1. Decide whether there is usable label or target signal at all.
 2. If there is signal, compare probe families from simpler to more complex.
 3. Escalate to a more complex family only when the evidence clearly supports
    that move.
@@ -352,9 +399,10 @@ scores. Instead, it follows a conservative escalation policy:
 ### 1. Reliability Gate
 
 If essential evidence is missing or the diagnostic run is too incomplete to
-support a family recommendation, the result is:
-
-- `insufficient_data_or_unreliable_geometry`
+support a family recommendation, the result is
+`insufficient_data_or_unreliable_geometry` for every target mode. Regression
+reports retain regression-specific wording in `recommendation_text` while
+sharing this machine-readable label.
 
 Reasoning:
 
@@ -366,8 +414,10 @@ Reasoning:
 Before choosing any model family, `separatix` checks whether the strongest
 observed probe clears a signal check against the dummy or prevalence baseline.
 
-For single-label runs, this is a 95% normal-approximation check against the
-dummy balanced-accuracy baseline.
+For single-label runs, this primarily requires the paired 95% bootstrap
+interval against the dummy to exclude zero and the point gain to clear the
+minimum signal margin. If that paired comparison is unavailable, the existing
+95% normal-approximation check is used for that comparison only.
 
 For multilabel runs, this requires the best predictive family to clearly beat
 the dummy or prevalence baseline on at least two of:
@@ -376,16 +426,29 @@ the dummy or prevalence baseline on at least two of:
 - `macro_f1`
 - `sample_jaccard`
 
-If that signal test fails, the result is:
+For regression runs, at least one best-family comparison must clearly beat the
+target-mean dummy on either variance-weighted R2 or uniform-average R2. Paired
+comparisons require a positive 95% lower bound and a point improvement greater
+than `0.01`; the marginal-standard-error rule uses its own uncertainty threshold
+when paired evidence is unavailable.
 
-- `feature_or_label_bottleneck_likely` when the neighborhoods already look as
+If a classification signal test fails, the result is:
+
+- `feature_or_target_bottleneck_likely` when the neighborhoods already look as
   mixed as a label-shuffled baseline would suggest
+- `inconclusive` otherwise
+
+If the regression signal test fails, the result is:
+
+- `feature_or_target_bottleneck_likely` when target-neighborhood smoothness is
+  below `0.35`
 - `inconclusive` otherwise
 
 Reasoning:
 
-- if even the best probe does not clearly beat the class-prior baseline, the
-  package should not claim that any model family is strongly indicated
+- if even the best probe does not clearly beat the class-prior, prevalence, or
+  target-mean baseline, the package should not claim that any model family is
+  strongly indicated
 
 ### 3. Conservative Family Escalation
 
@@ -400,7 +463,7 @@ If signal is present, `separatix` compares probe families in complexity order:
 If the linear family is statistically close enough to the strongest observed
 family, the result is:
 
-- `linear_likely_sufficient`
+- `linear_likely_sufficient` for every target mode
 
 Reasoning:
 
@@ -409,12 +472,15 @@ Reasoning:
 - in the multilabel path, "close enough" means linear is within one standard
   error of the best family on at least two primary metrics and not clearly
   worse on the third
+- in the regression path, linear must remain within the paired-error tolerance
+  of the best family on at least one primary R2 metric and must not be clearly
+  worse on either; the marginal one-standard-error rule remains the fallback
 
 #### Smooth Nonlinear Recommendation
 
 If linear is no longer sufficient, the default nonlinear recommendation is:
 
-- `smooth_nonlinear_recommended`
+- `smooth_nonlinear_recommended` for every target mode
 
 Reasoning:
 
@@ -426,11 +492,16 @@ Reasoning:
   `recommended_family` may differ
 - in the multilabel path, the smooth family must clearly improve over linear on
   at least two primary metrics
+- in the regression path, the smooth family must clearly improve over linear on
+  at least one primary R2 metric while the local/kernel family does not clearly
+  improve over smooth
 
 #### Local Or Kernel Recommendation
 
-`kernel_or_local_recommended` is reserved for cases where the local/kernel
-family clearly beats the smooth nonlinear family after uncertainty adjustment.
+The local/kernel recommendation is reserved for cases where that family clearly
+beats the smooth nonlinear family after uncertainty adjustment:
+
+- `kernel_or_local_recommended` for every target mode
 
 Reasoning:
 
@@ -438,27 +509,56 @@ Reasoning:
   local/kernel probe edges out smooth by only a small amount
 - in the multilabel path, the local/kernel family must clearly beat the smooth
   family on at least two primary metrics
+- in the regression path, it must clearly beat smooth on at least one primary R2
+  metric
+
+#### Plausible Core-Family Set
+
+Alongside the single recommendation, the report returns a competitive frontier
+over `linear`, `smooth_nonlinear`, and `local_kernel`. Families simpler than the
+minimum recommended family are excluded. Among the remaining families:
+
+- single-label classification excludes a family when another eligible family
+  clearly beats it on balanced accuracy
+- multilabel classification excludes a family when another eligible family
+  clearly beats it on at least two of the three primary metrics
+- regression excludes a family when another eligible family is clearly better
+  on at least one primary R2 metric and is not clearly worse on the other
+
+When multilabel or regression metrics have strong signal but do not resolve a
+minimum family, the rank floor is omitted and the nondominated core families
+are reported. The minimum family is always retained when it is resolved.
+Paired out-of-fold bootstrap comparisons are used when available, with the
+existing marginal-standard-error fallback recorded explicitly otherwise.
+
+The result is heuristic and confidence-aware, but it is not a formal confidence
+set or an equivalence claim. It does not include optional MLP probes or the
+high-capacity/partitioning structural upgrade.
 
 ### 4. High-Capacity Or Partitioning Upgrade
 
 If the local/kernel family clearly wins and the boundary evidence also suggests
 fragmented structure, the result can be upgraded to:
 
-- `high_capacity_or_partitioning_recommended`
+- `high_capacity_or_partitioning_recommended` for every target mode
 
 Reasoning:
 
 - not all local structure implies highly partitioned boundaries
 - in the multilabel path, this upgrade currently requires both a clear
   local/kernel win and sufficiently strong boundary graph fragmentation
+- in the regression path, this upgrade requires a local/kernel recommendation
+  and a target-neighborhood `high_discontinuity_fraction` of at least `0.35`
 - topology can reinforce the explanation, but it does not replace the
-  fragmentation gate
+  classification fragmentation gate and never changes a regression
+  recommendation
 
 ### 5. Mixed-Evidence Fallback
 
 If none of the above branches dominate, the result is:
 
-- `inconclusive`
+`inconclusive` for every target mode. Regression reports retain
+regression-specific wording in `recommendation_text` while sharing the label.
 
 Reasoning:
 
@@ -468,13 +568,17 @@ Reasoning:
 
 The user-facing confidence label is derived from evidence quality:
 
-- `high` when the signal gate clears and no cautionary evidence flags dominate
-- `medium` when a recommendation is still made but cautionary flags are present
-- `low` when the result is inconclusive or the diagnostics are too unreliable
+- `high` for a supported family or bottleneck outcome when no cautionary or
+  blocking evidence flags are present
+- `medium` when a family or bottleneck outcome remains usable but cautionary
+  flags are present; a classification `inconclusive` result can also be medium
+  when no cautionary flags are present
+- `low` for insufficient-data outcomes, regression inconclusive outcomes, or a
+  classification inconclusive result accompanied by cautionary evidence
 
 This confidence label is deliberately coarse. It communicates how much trust to
-place in the recommendation, not how likely a future classifier is to achieve a
-specific accuracy.
+place in the recommendation, not how likely a future classifier or regressor is
+to achieve a specific score.
 
 ## Why This Logic Exists
 
